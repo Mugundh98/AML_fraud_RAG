@@ -1,0 +1,22 @@
+# Web / UI
+fastapi>=0.115
+uvicorn[standard]>=0.32
+streamlit>=1.40
+httpx>=0.27
+
+# Config
+pydantic>=2.9
+pydantic-settings>=2.6
+
+# LLM providers (Gemini primary, Groq fallback)
+google-genai>=1.0
+groq>=0.13
+
+# Vector store + local CPU embeddings (dense + BM25 sparse)
+qdrant-client[fastembed]>=1.12
+
+# Document loading
+pypdf>=5.0
+
+# Tests
+pytest>=8.3
