@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -36,8 +37,23 @@ class Settings(BaseSettings):
     max_transactions: int = 50_000
     synthetic_dir: Path = PROJECT_ROOT / "data" / "synthetic"
 
+    # Phase 4: outside services. Each MCP server is only started when its credentials are set.
+    tavily_api_key: str = ""
+    tavily_mcp_url: str = "https://mcp.tavily.com/mcp/"
+    google_client_secret_file: Path = PROJECT_ROOT / "secrets" / "google_client_secret.json"
+    google_token_file: Path = PROJECT_ROOT / "secrets" / "google_token.json"
+    slack_bot_token: str = ""
+    slack_default_channel: str = ""
+    # Pending write actions (Slack posts, calendar events) expire if nobody approves them.
+    approval_ttl_minutes: int = 30
+
     docs_dir: Path = PROJECT_ROOT / "data" / "docs"
     api_url: str = "http://localhost:8000"
+
+    @field_validator("google_client_secret_file", "google_token_file")
+    @classmethod
+    def _relative_to_project(cls, path: Path) -> Path:
+        return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 @lru_cache

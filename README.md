@@ -13,9 +13,9 @@ A learning project for **RAG** and **MCP**, built as an enterprise-style AML and
   └─ MCP client                                                   [phase 3 ✓]
        ├── aml-data-mcp (ours) ──┬── Neo4j  (customers, accounts, transactions)   [phase 2 ✓]
        │                         └── Qdrant (regulations, policies, typologies)   [phase 1 ✓]
-       ├── tavily-mcp            (web search)                     [phase 4]
-       ├── google-calendar-mcp   (case review meetings)           [phase 4]
-       └── slack-mcp             (escalations)                    [phase 4]
+       ├── tavily (hosted, HTTP) (web search)                     [phase 4 ✓]
+       ├── google-calendar (ours) (case review meetings)          [phase 4 ✓]
+       └── slack (ours)          (escalations)                    [phase 4 ✓]
 ```
 
 ## Roadmap
@@ -25,8 +25,8 @@ A learning project for **RAG** and **MCP**, built as an enterprise-style AML and
 | 1 | Document RAG: hybrid search in Qdrant, cited answers, Gemini→Groq fallback, Streamlit chat | **Done** |
 | 2 | Synthetic transactions (≤ 50k rows) in Neo4j + our own `aml-data-mcp` server | **Done** |
 | 3 | Agent loop that routes between documents and the graph via MCP | **Done** |
-| 4 | Tavily, Google Calendar, Slack MCP servers, with confirmation before any write | Next |
-| 5 | Hardening: audit log, roles, PII redaction, Langfuse tracing, evaluation set | |
+| 4 | Tavily, Google Calendar, Slack MCP servers, with confirmation before any write | **Done** |
+| 5 | Hardening: audit log, roles, PII redaction, Langfuse tracing, evaluation set | Next |
 
 ## Phase 1: how it works
 
@@ -163,7 +163,7 @@ question ─► LLM ─► tool calls? ──no──► answer (+ cited sources
 ```
 
 - **MCP client** – `app/agent/mcp_hub.py` starts each MCP server as a subprocess when the API starts, lists its tools and keeps the connection open. Tools are offered to the model by their MCP name, description and JSON Schema. Several servers can be attached; phase 4 adds more.
-- **Read-only for now** – only tools the server marks `readOnlyHint` are offered. Anything that could change something (send a Slack message, book a meeting) waits for phase 4's confirmation step.
+- **Approval for writes** – tools that change something only run after the analyst approves (phase 4, below).
 - **One tool format, two providers** – messages are stored in a neutral format and translated per provider (`app/llm/gemini.py`, `app/llm/groq_provider.py`). Gemini 3 attaches a *thought signature* to each tool call and rejects the next request if it isn't sent back, so the signature travels with the call.
 - **Fallback mid-task** – if Gemini fails on step 3, Groq continues from the same conversation, including Gemini's tool calls and their results. A task only moves down the list, never back.
 - **Circuit breaker** – a model that fails is skipped for 2 minutes, so an overloaded Gemini Flash doesn't cost every request a 30-second timeout (`app/llm/router.py`).
@@ -186,6 +186,38 @@ What live testing taught us (each one is now fixed):
 | Asked if activity was suspicious, the model compared monthly totals with the declared volume (which matched) and missed 5 deposits just under $10,000 | The system prompt tells it to run the matching detection tools |
 | Told it may not call tools, Gemini Flash-Lite returned an empty reply | The last round also says, in words, to answer now |
 | Gemini Flash overloaded (503/504) on most requests that day | Circuit breaker, so later requests go straight to Flash-Lite |
+
+## Phase 4: web search, calendar, Slack, and approval before any write
+
+Three more MCP servers, each started only when its credentials are in `.env` (see `SETUP_ACCOUNTS.md`):
+
+| Server | How it connects | Tools | Needs approval |
+|---|---|---|---|
+| `tavily` | Tavily's **hosted** MCP server over HTTP; the key goes in an `Authorization` header | `tavily_search`, `tavily_extract` | no |
+| `google-calendar` | ours, stdio (`mcp_servers/google_calendar/`), OAuth sign-in | `list_events`, `find_free_slots` | `create_event` |
+| `slack` | ours, stdio (`mcp_servers/slack/`), bot token | `list_channels` | `post_message` |
+
+Tavily also offers crawl, map and research tools; they're left out because they use many more of the free tier's 1,000 monthly credits.
+
+### Approval before any write
+
+```
+model calls post_message(...) ─► not run: stored as a pending action ─► "waiting for your approval"
+                                                  │
+          analyst clicks Approve in the UI ───────┴─► POST /actions/{id} ─► tool runs with the stored arguments
+```
+
+- **What needs approval** – for our own servers, any tool not annotated `readOnlyHint`. For a third-party server the annotations are only that server's claim (the MCP spec says not to rely on them from untrusted servers), so `ServerConfig.auto_run` lists the tools that may run without approval and everything else needs it (`app/agent/mcp_hub.py`).
+- **No LLM between approval and action** – approving runs the exact tool and arguments shown on the card. The model can't change the message after you've read it.
+- **Once, and not forever** – an action is removed when it's decided, so a double click or a replayed request can't post twice. Undecided actions expire after `APPROVAL_TTL_MINUTES` (30) (`app/agent/approvals.py`).
+- **The conversation remembers** – the UI adds the outcome ("approved and done", "rejected") to the chat, so a follow-up question knows what happened.
+- **Dates** – the system prompt now tells the model today's date and timezone, because "tomorrow afternoon" is a real date, while time windows in the bank data still count back from the dataset's as-of date.
+
+In the terminal, `scripts.ask` asks y/n for each proposed action:
+
+```bash
+python -m scripts.ask "Escalate alert AL-0002 to the compliance Slack channel with a short summary."
+```
 
 ## Adding documents
 

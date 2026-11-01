@@ -1,13 +1,15 @@
 """The agent loop end to end: a scripted fake LLM, our real MCP server (in-process, fake databases), real MCP client."""
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
+from app.agent.approvals import ApprovalQueue
 from app.agent.loop import Agent
-from app.agent.mcp_hub import MCPHub
+from app.agent.mcp_hub import MCPHub, ServerConfig
 from app.llm import AssistantTurn, LLMRouter, Message, ToolCall
 from mcp_servers.aml_data.server import create_server
 from tests.test_mcp_server import FakeGraph
@@ -146,7 +148,8 @@ def test_no_llm_falls_back_to_passages():
     assert "passages" in result.answer
 
 
-def test_tools_that_are_not_read_only_are_not_offered():
+def mixed_server(sent: list):
+    """A server with one read-only tool and one that changes something."""
     server = MCPServer("mixed")
 
     @server.tool(annotations=ToolAnnotations(read_only_hint=True))
@@ -155,13 +158,108 @@ def test_tools_that_are_not_read_only_are_not_offered():
 
     @server.tool()
     def send_message(text: str) -> str:
+        sent.append(text)
         return "sent"
 
-    async def main():
-        async with MCPHub({"mixed": server}) as hub:
-            return [t.name for t in hub.specs()], hub.status["mixed"], await hub.call("send_message", {"text": "hi"})
+    return server
 
-    offered, status, refused = asyncio.run(main())
-    assert offered == ["lookup"]
-    assert status.blocked_tools == ["send_message"]
-    assert not refused.ok
+
+def test_tools_without_read_only_hint_need_approval():
+    async def main():
+        async with MCPHub({"mixed": mixed_server([])}) as hub:
+            return hub, await hub.call("send_message", {"text": "hi"})
+
+    hub, refused = asyncio.run(main())
+    assert hub.status["mixed"].tools == ["lookup"]
+    assert hub.status["mixed"].approval_tools == ["send_message"]
+    assert not refused.ok and "approval" in refused.text
+
+
+def test_third_party_policy_overrides_annotations_and_filters_tools():
+    async def main():
+        config = ServerConfig(mixed_server([]), tools={"send_message"}, auto_run=set())
+        async with MCPHub({"web": config}) as hub:
+            return [t.name for t in hub.specs()], hub.needs_approval("send_message")
+
+    offered, needs_approval = asyncio.run(main())
+    assert offered == ["send_message"]  # lookup filtered out
+    assert needs_approval
+
+
+def run_with_actions(script, decide):
+    """Ask once with the mixed server, then call decide(agent, answer) while the hub is still open."""
+    sent = []
+
+    async def main():
+        async with MCPHub({"mixed": mixed_server(sent)}) as hub:
+            agent = Agent(hub, LLMRouter([ScriptedLLM("gemini", script)]), ApprovalQueue(ttl_seconds=600))
+            answer = await agent.answer("escalate it", [])
+            return answer, await decide(agent, answer)
+
+    answer, decided = asyncio.run(main())
+    return answer, decided, sent
+
+
+PROPOSE = [
+    AssistantTurn("", [call("send_message", text="AL-0002 needs Level 2 review")]),
+    AssistantTurn("I've drafted the Slack message; it's waiting for your approval."),
+]
+
+
+def test_write_tool_becomes_a_pending_action_and_does_not_run():
+    async def nothing(agent, answer):
+        return None
+
+    answer, _, sent = run_with_actions(PROPOSE, nothing)
+
+    assert sent == []
+    assert [(a.tool, a.arguments) for a in answer.pending_actions] == [
+        ("send_message", {"text": "AL-0002 needs Level 2 review"})
+    ]
+    assert answer.tool_calls[0].needs_approval
+
+
+def test_approval_runs_the_stored_arguments_exactly_once():
+    async def approve_twice(agent, answer):
+        action_id = answer.pending_actions[0].id
+        return await agent.execute(action_id, True), await agent.execute(action_id, True)
+
+    _, (first, second), sent = run_with_actions(PROPOSE, approve_twice)
+
+    assert sent == ["AL-0002 needs Level 2 review"]
+    assert first.status == "done" and second.status == "expired"
+
+
+def test_rejection_runs_nothing():
+    async def reject(agent, answer):
+        return await agent.execute(answer.pending_actions[0].id, False)
+
+    _, outcome, sent = run_with_actions(PROPOSE, reject)
+    assert outcome.status == "rejected" and sent == []
+
+
+def test_repeated_proposal_is_one_action():
+    script = [
+        AssistantTurn("", [call("send_message", text="same"), call("send_message", text="same")]),
+        AssistantTurn("Waiting for approval."),
+    ]
+
+    async def nothing(agent, answer):
+        return None
+
+    answer, _, _ = run_with_actions(script, nothing)
+    assert len(answer.pending_actions) == 1
+
+
+def test_actions_expire():
+    clock = [1000.0]
+    queue = ApprovalQueue(ttl_seconds=60, clock=lambda: clock[0])
+    action = queue.add("send_message", "slack", {"text": "hi"})
+    clock[0] += 61
+    assert queue.take(action.id) is None
+
+
+def test_system_prompt_states_today_and_timezone():
+    now = datetime(2026, 11, 1, 9, 30, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    agent = Agent(hub=None, router=None, now=lambda: now)
+    assert "Today is Sunday 01 November 2026. The analyst's timezone is UTC+05:30." in agent.system_prompt()

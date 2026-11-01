@@ -30,6 +30,15 @@ class ToolStepOut(BaseModel):
     preview: str
     duration_ms: int
     round: int
+    needs_approval: bool
+
+
+class PendingActionOut(BaseModel):
+    id: str
+    tool: str
+    server: str
+    arguments: dict[str, Any]
+    created_at: float
 
 
 class ChatResponse(BaseModel):
@@ -39,11 +48,23 @@ class ChatResponse(BaseModel):
     sources: list[SourceOut]
     tool_calls: list[ToolStepOut]
     fallback_reasons: list[str]
+    pending_actions: list[PendingActionOut]
+
+
+class ActionDecision(BaseModel):
+    approve: bool
+
+
+class ActionOutcomeOut(BaseModel):
+    action_id: str
+    status: Literal["done", "failed", "rejected", "expired"]
+    tool: str
+    result: str
 
 
 class MCPServerOut(BaseModel):
     tools: list[str]
-    blocked_tools: list[str]
+    approval_tools: list[str]
     error: str | None
 
 

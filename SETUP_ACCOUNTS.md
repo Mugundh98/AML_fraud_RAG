@@ -45,19 +45,45 @@ then set `NEO4J_URI=bolt://localhost:7687` and `NEO4J_PASSWORD=localpassword`.
 
 ## Phase 4
 
+Each of these is optional: the API only starts the MCP servers whose credentials are set.
+
 ### 5. Tavily (web search)
-Sign up at https://tavily.com. The free plan includes monthly search credits, no card needed.
+Sign up at https://tavily.com. The free plan has 1,000 credits a month, no card needed. Put the key in `.env` as `TAVILY_API_KEY`.
 
 ### 6. Google Calendar API
-1. Create a project at https://console.cloud.google.com.
-2. Enable the **Google Calendar API**.
-3. Configure the OAuth consent screen as **External**, leave it in **Testing**, and add your own Google account as a test user.
-4. Create an **OAuth client ID** of type **Desktop app** and download the JSON.
+1. Use any project at https://console.cloud.google.com (the one AI Studio created for your Gemini key works).
+2. Enable the **Google Calendar API** (APIs & Services > Library).
+3. Configure the OAuth consent screen as **External**, leave it in **Testing**, and under **Audience** add your own Google account as a test user.
+4. Create an **OAuth client ID** of type **Desktop app**, download the JSON and save it as `secrets/google_client_secret.json` (git ignores `secrets/`).
+5. Sign in once:
+   ```bash
+   python -m scripts.google_auth
+   ```
+   The browser shows "Google hasn't verified this app": it's your own app, so continue. The token is saved in `secrets/`. While the app is in **Testing**, Google expires the sign-in after 7 days; the assistant tells you when to run this again.
 
 ### 7. Slack
-1. Create a free workspace for testing.
-2. Create an app at https://api.slack.com/apps, add bot scopes (`chat:write`, `channels:read`), and install it to the workspace.
-3. Create an `#fcu-escalations` channel and invite the bot.
+1. Use a workspace where you can install apps (a free one is fine).
+2. At https://api.slack.com/apps choose **Create New App > From a manifest**, pick the workspace and paste:
+   ```yaml
+   display_information:
+     name: AML Assistant
+   features:
+     bot_user:
+       display_name: AML Assistant
+       always_online: false
+   oauth_config:
+     scopes:
+       bot:
+         - chat:write
+         - chat:write.public
+         - channels:read
+   settings:
+     org_deploy_enabled: false
+     socket_mode_enabled: false
+     token_rotation_enabled: false
+   ```
+3. **Install to Workspace**, then copy the **Bot User OAuth Token** (`xoxb-...`) into `.env` as `SLACK_BOT_TOKEN`.
+4. Set `SLACK_DEFAULT_CHANNEL` to the escalation channel's ID: the `C...` part of its URL (`https://app.slack.com/client/T.../C...`). With `chat:write.public` the bot can post to public channels without being invited; for a private channel, `/invite @AML Assistant` first.
 
 ## Phase 5
 

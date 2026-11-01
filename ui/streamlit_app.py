@@ -1,3 +1,4 @@
+import json
 import os
 
 import httpx
@@ -34,9 +35,58 @@ def render_tool_calls(steps: list[dict]) -> None:
     with st.expander(f"Tool calls ({len(steps)} in {rounds} round{'s' if rounds > 1 else ''})"):
         for s in steps:
             args = ", ".join(f"{k}={v!r}" for k, v in s["arguments"].items())
-            icon = "✅" if s["ok"] else "⚠️"
+            icon = "⏸️" if s.get("needs_approval") else "✅" if s["ok"] else "⚠️"
             st.markdown(f"{icon} **{s['round']}.** `{s['tool']}({args})` · {s['duration_ms']} ms")
             st.caption(s["preview"])
+
+
+ACTION_LABELS = {"post_message": "Post to Slack", "create_event": "Create a calendar event"}
+STATUS_TEXT = {
+    "done": "✅ Approved and done",
+    "failed": "⚠️ Approved, but it failed",
+    "rejected": "❌ Rejected, nothing was done",
+    "expired": "⌛ Expired or already decided, nothing was done",
+}
+
+
+def render_actions(message: dict) -> None:
+    """Approve/reject cards for actions the agent proposed. Nothing runs until the analyst clicks Approve."""
+    outcomes = message.setdefault("outcomes", {})
+    for action in message.get("pending_actions", []):
+        label = ACTION_LABELS.get(action["tool"], action["tool"])
+        with st.container(border=True):
+            st.markdown(f"**{label}** · needs your approval · `{action['server']}`")
+            for key, value in action["arguments"].items():
+                if isinstance(value, str) and ("\n" in value or len(value) > 80):
+                    st.markdown(f"**{key}:**")
+                    st.text(value)
+                else:
+                    st.markdown(f"**{key}:** {', '.join(value) if isinstance(value, list) else value}")
+            outcome = outcomes.get(action["id"])
+            if outcome:
+                st.markdown(STATUS_TEXT[outcome["status"]])
+                link = _link(outcome["result"])
+                if link:
+                    st.markdown(f"[Open it]({link})")
+                elif outcome["status"] == "failed":
+                    st.caption(outcome["result"])
+                continue
+            approve, reject = st.columns(2)
+            for column, approved, text in ((approve, True, "Approve"), (reject, False, "Reject")):
+                if column.button(text, key=f"{action['id']}-{text}", type="primary" if approved else "secondary",
+                                 width="stretch"):
+                    outcome = api("POST", f"/actions/{action['id']}", json={"approve": approved})
+                    outcomes[action["id"]] = outcome
+                    # Recorded in the conversation, so the agent knows on the next question what happened.
+                    message["content"] += f"\n\n_{label}: {STATUS_TEXT[outcome['status']].split(' ', 1)[1].lower()}._"
+                    st.rerun()
+
+
+def _link(result: str) -> str | None:
+    try:
+        return json.loads(result).get("link")
+    except (ValueError, AttributeError):
+        return None
 
 
 def render_meta(message: dict) -> None:
@@ -60,7 +110,8 @@ with st.sidebar:
             if server["error"]:
                 st.error(f"MCP `{name}`: {server['error']}")
             else:
-                st.write(f"**MCP `{name}`:** {len(server['tools'])} tools")
+                approval = f", {len(server['approval_tools'])} need approval" if server["approval_tools"] else ""
+                st.write(f"**MCP `{name}`:** {len(server['tools'])} tools{approval}")
     except httpx.HTTPError:
         st.error(f"Backend not reachable at {API_URL}. Start it with `uvicorn app.api.main:app`.")
         st.stop()
@@ -78,14 +129,16 @@ with st.sidebar:
         st.rerun()
 
 st.title("AML & Fraud Assistant")
-st.caption("An agent that searches the policy documents and queries the transaction graph through MCP tools. "
-           "All data is synthetic.")
+st.caption("An agent that uses MCP tools: policy documents, the transaction graph, the web, your calendar and "
+           "Slack. Anything that changes something waits for your approval. Bank data is synthetic.")
 
 EXAMPLES = [
     "Which open alerts are High priority?",
     "Are there accounts structuring cash deposits that have no alert yet?",
     "Investigate the circular flow alert. Does our policy require escalation?",
-    "What's the SAR filing deadline, and when would it fall for alert AL-0001?",
+    "Any recent FinCEN enforcement actions involving structuring? Search the web.",
+    "Escalate alert AL-0002 to the compliance Slack channel with a short summary.",
+    "Book a 30-minute case review for alert AL-0002 tomorrow afternoon.",
 ]
 
 if "messages" not in st.session_state:
@@ -98,6 +151,7 @@ for message in st.session_state.messages:
             render_meta(message)
             render_tool_calls(message.get("tool_calls", []))
             render_sources(message.get("sources", []))
+            render_actions(message)
 
 if not st.session_state.messages:
     st.markdown("**Try:**")
@@ -120,9 +174,5 @@ if question:
                 result = api("POST", "/chat", json={"message": question, "history": history})
             except httpx.HTTPError as exc:
                 result = {"answer": f"Request failed: {exc}", "provider": "none", "model": "", "sources": []}
-        message = {"role": "assistant", "content": result["answer"], **result}
-        st.markdown(message["content"])
-        render_meta(message)
-        render_tool_calls(message.get("tool_calls", []))
-        render_sources(message.get("sources", []))
-    st.session_state.messages.append(message)
+    st.session_state.messages.append({**result, "role": "assistant", "content": result["answer"]})
+    st.rerun()  # the history loop above renders the answer, including any approval buttons

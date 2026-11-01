@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+# OAuth client file and tokens (Google Calendar)
+secrets/
 storage/
 data/raw/
 # Regenerate with: python -m scripts.generate_data
