@@ -29,6 +29,9 @@ class ServerConfig:
     target: Any  # what mcp.Client connects to: StdioServerParameters, an HTTP transport, or (tests) an MCPServer
     tools: set[str] | None = None  # offer only these tools; None offers all of them
     auto_run: set[str] | None = None  # tools that run without approval; None trusts the server's readOnlyHint
+    # Per tool, the only parameters the model sees (the server uses its defaults for the rest). Every tool
+    # definition is sent with every model call, so unused options cost tokens on each step.
+    params: dict[str, set[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -70,12 +73,54 @@ def default_servers(settings: Settings, project_root: Path) -> dict[str, ServerC
             # Crawl, map and research also exist, but cost many more of the free tier's credits.
             tools={"tavily_search", "tavily_extract"},
             auto_run={"tavily_search", "tavily_extract"},
+            # Search has 17 options (images, favicons, country boost...); these are the ones AML research uses.
+            params={
+                "tavily_search": {"query", "max_results", "topic", "time_range", "include_domains"},
+                "tavily_extract": {"urls", "query"},
+            },
         )
     if settings.google_client_secret_file.exists():
         servers["google-calendar"] = ServerConfig(local("mcp_servers.google_calendar"))
     if settings.slack_bot_token:
         servers["slack"] = ServerConfig(local("mcp_servers.slack"))
     return servers
+
+
+def compact_schema(schema: dict[str, Any], keep: set[str] | None = None) -> dict[str, Any]:
+    """The same constraints in fewer tokens.
+
+    Drops the labels pydantic adds to every field ("title": "Account Id") and `"default": null`, turns
+    `anyOf: [X, {"type": "null"}]` into X (the field is optional anyway: it isn't in `required`), and if
+    `keep` is given, removes every other top-level parameter.
+    """
+    compact = _compact(schema)
+    if keep is not None:
+        compact["properties"] = {k: v for k, v in compact.get("properties", {}).items() if k in keep}
+        if "required" in compact:
+            compact["required"] = [r for r in compact["required"] if r in keep]
+    return compact
+
+
+def _compact(node: Any) -> Any:
+    if isinstance(node, list):
+        return [_compact(n) for n in node]
+    if not isinstance(node, dict):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if (key == "title" and isinstance(value, str)) or (key == "default" and value is None):
+            continue
+        if key == "properties" and isinstance(value, dict):
+            # Keys here are parameter names (one may well be called "title"), not schema keywords.
+            out[key] = {name: _compact(prop) for name, prop in value.items()}
+        else:
+            out[key] = _compact(value)
+    variants = out.get("anyOf")
+    if isinstance(variants, list) and len(variants) == 2 and {"type": "null"} in variants:
+        other = next(v for v in variants if v != {"type": "null"})
+        del out["anyOf"]
+        out = {**other, **out}
+    return out
 
 
 class MCPHub:
@@ -110,7 +155,8 @@ class MCPHub:
                     needs_approval = tool.name not in config.auto_run
                 else:
                     needs_approval = not (tool.annotations and tool.annotations.read_only_hint)
-                self._tools[tool.name] = _Tool(name, ToolSpec(tool.name, tool.description or "", tool.input_schema),
+                schema = compact_schema(tool.input_schema, config.params.get(tool.name))
+                self._tools[tool.name] = _Tool(name, ToolSpec(tool.name, tool.description or "", schema),
                                                needs_approval)
                 (status.approval_tools if needs_approval else status.tools).append(tool.name)
             log.info("MCP server %s: %d tools, %d need approval", name, len(status.tools), len(status.approval_tools))

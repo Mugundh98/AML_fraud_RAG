@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -89,6 +90,25 @@ def chat_format(system: str, messages: list[Message]) -> list[dict]:
 
 def _tool_call_dict(call: ToolCall) -> dict:
     return {"id": call.id, "type": "function", "function": {"name": call.name, "arguments": json.dumps(call.arguments)}}
+
+
+class RateLimited(RuntimeError):
+    """The provider refused the request for now; `retry_after` says how long to wait, if it told us."""
+
+    def __init__(self, message: str, retry_after: float | None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+# "Please try again in 8.4s" / "in 1m2.5s" (Groq), "'retryDelay': '40s'" (Gemini)
+_WAIT = re.compile(r"(?:try again in|retryDelay'?:\s*'?)\s*(?:(\d+)m)?\s*(\d+(?:\.\d+)?)s", re.IGNORECASE)
+
+
+def retry_after_from(text: str) -> float | None:
+    match = _WAIT.search(text)
+    if not match:
+        return None
+    return int(match.group(1) or 0) * 60 + float(match.group(2))
 
 
 class NoProviderAvailable(RuntimeError):

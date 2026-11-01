@@ -1,6 +1,6 @@
 import json
 
-from app.llm.base import AssistantTurn, Message, ToolCall, ToolSpec, chat_format
+from app.llm.base import AssistantTurn, Message, RateLimited, ToolCall, ToolSpec, chat_format, retry_after_from
 
 
 class GroqProvider:
@@ -21,7 +21,7 @@ class GroqProvider:
 
     def chat(self, system: str, messages: list[Message], tools: list[ToolSpec],
              force_answer: bool = False) -> AssistantTurn:
-        from groq import Groq
+        from groq import Groq, RateLimitError
 
         if self._client is None:
             self._client = Groq(api_key=self.api_key, timeout=self.timeout_seconds, max_retries=0)
@@ -33,12 +33,16 @@ class GroqProvider:
                 for t in tools
             ]
             kwargs["tool_choice"] = "none" if force_answer else "auto"
-        response = self._client.chat.completions.create(
-            model=self.model,
-            messages=self.to_messages(system, messages),
-            temperature=self.temperature,
-            **kwargs,
-        )
+        try:
+            response = self._client.chat.completions.create(
+                model=self.model,
+                messages=self.to_messages(system, messages),
+                temperature=self.temperature,
+                **kwargs,
+            )
+        except RateLimitError as exc:
+            header = exc.response.headers.get("retry-after") if exc.response is not None else None
+            raise RateLimited(str(exc), float(header) if header else retry_after_from(str(exc))) from exc
         reply = response.choices[0].message
         calls = [
             ToolCall(id=c.id, name=c.function.name, arguments=json.loads(c.function.arguments or "{}"), model=self.model)

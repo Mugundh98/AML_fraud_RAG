@@ -263,3 +263,28 @@ def test_system_prompt_states_today_and_timezone():
     now = datetime(2026, 11, 1, 9, 30, tzinfo=timezone(timedelta(hours=5, minutes=30)))
     agent = Agent(hub=None, router=None, now=lambda: now)
     assert "Today is Sunday 01 November 2026. The analyst's timezone is UTC+05:30." in agent.system_prompt()
+
+
+def test_schemas_are_compacted_without_losing_constraints():
+    from app.agent.mcp_hub import compact_schema
+
+    schema = {
+        "type": "object", "title": "createArguments",
+        "properties": {
+            "title": {"title": "Title", "type": "string"},
+            "channel": {"anyOf": [{"enum": ["a", "b"], "type": "string"}, {"type": "null"}], "default": None,
+                        "title": "Channel", "description": "Which channel"},
+            "days": {"default": 90, "title": "Days", "type": "integer"},
+            "noise": {"type": "boolean"},
+        },
+        "required": ["title", "noise"],
+    }
+    assert compact_schema(schema, keep={"title", "channel", "days"}) == {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},  # a parameter called "title" survives
+            "channel": {"enum": ["a", "b"], "type": "string", "description": "Which channel"},
+            "days": {"default": 90, "type": "integer"},
+        },
+        "required": ["title"],
+    }

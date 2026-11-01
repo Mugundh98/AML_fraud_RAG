@@ -42,7 +42,7 @@ async def ask(settings, question: str) -> None:
             print(f"[{s.number}] {s.title} > {s.section}  ({s.source})")
         print(f"\nAnswered by {result.provider}/{result.model}")
         for reason in result.fallback_reasons:
-            print(f"Skipped: {reason[:150]}")
+            print(f"Fallback or retry: {reason[:150]}")
 
         for action in result.pending_actions:
             print(f"\nProposed action: {action.tool} on {action.server}")

@@ -96,7 +96,7 @@ def render_meta(message: dict) -> None:
         st.caption(f"Answered by {message['provider']} · {message['model']}")
     if message.get("fallback_reasons"):
         reasons = [r if len(r) <= 90 else r[:90] + "…" for r in message["fallback_reasons"]]
-        st.caption("Skipped: " + " · ".join(reasons))
+        st.caption("Fallbacks and retries: " + " · ".join(reasons))
 
 
 with st.sidebar:

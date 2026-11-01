@@ -247,8 +247,10 @@ See the latest trace without opening Langfuse:
 python -m scripts.show_trace
 ```
 
-Two things the first traces showed:
-- **Groq's free tier allows 8,000 tokens a minute**, and an agent step is about 3,900 tokens (most of it the 15 tool descriptions), so Groq-only conversations hit 429 errors after two steps.
+What the first traces showed, and what changed:
+- **Groq's free tier allows 8,000 tokens a minute**, and an agent step is 2,500–4,000 tokens (most of it the 18 tool definitions), so a quick Groq-only investigation hit a 429 on its third step and failed. Two fixes:
+  - **Compact tool schemas** (`compact_schema` in `app/agent/mcp_hub.py`): the labels pydantic adds to every field, `"default": null` and `anyOf [X, null]` wrappers are dropped, and Tavily's search tool exposes 5 of its 17 options. Definitions went from 16,290 to 10,579 characters, but Groq's first-step input only fell from 2,804 to 2,508 tokens (−11%): the descriptions that tell the model when to use each tool are most of the cost, and they stay.
+  - **Waiting out short rate limits** (`app/llm/router.py`): providers report "try again in N seconds" as `RateLimited`. A rate-limited provider is benched for exactly that long (not the 2-minute circuit-breaker cooldown), and when no other model is left the router waits up to 20 seconds and retries. The same investigation now pauses ~4 seconds on step 3 and finishes.
 - **Groq has no price in Langfuse**: `openai/gpt-oss-120b` isn't in its default model list, so those generations have tokens but no cost. Add a custom model definition in Langfuse (Settings > Models) if you want one.
 
 ## Adding documents

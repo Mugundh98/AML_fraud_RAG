@@ -1,6 +1,6 @@
 import uuid
 
-from app.llm.base import AssistantTurn, Message, ToolCall, ToolSpec
+from app.llm.base import AssistantTurn, Message, RateLimited, ToolCall, ToolSpec, retry_after_from
 
 # Documented placeholder for tool calls whose real signature we don't have (e.g. made by another model).
 SKIP_SIGNATURE = b"skip_thought_signature_validator"
@@ -44,9 +44,16 @@ class GeminiProvider:
                 config.tool_config = types.ToolConfig(
                     function_calling_config=types.FunctionCallingConfig(mode=types.FunctionCallingConfigMode.NONE)
                 )
-        response = self._get_client().models.generate_content(
-            model=self.model, contents=self.to_contents(messages), config=config
-        )
+        from google.genai import errors
+
+        try:
+            response = self._get_client().models.generate_content(
+                model=self.model, contents=self.to_contents(messages), config=config
+            )
+        except errors.ClientError as exc:
+            if exc.code == 429:
+                raise RateLimited(str(exc), retry_after_from(str(exc))) from exc
+            raise
 
         candidate = response.candidates[0] if response.candidates else None
         parts = (candidate.content.parts if candidate and candidate.content else None) or []

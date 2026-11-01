@@ -3,7 +3,9 @@ import time
 from dataclasses import dataclass, field
 
 from app.config import Settings
-from app.llm.base import AssistantTurn, LLMProvider, LLMResult, Message, NoProviderAvailable, ToolSpec, chat_format
+from app.llm.base import (
+    AssistantTurn, LLMProvider, LLMResult, Message, NoProviderAvailable, RateLimited, ToolSpec, chat_format,
+)
 from app.llm.gemini import GeminiProvider
 from app.llm.groq_provider import GroqProvider
 from app.observability import langfuse
@@ -26,15 +28,23 @@ class LLMRouter:
     one on any error (rate limit, outage, retired model, empty response).
 
     Circuit breaker: a provider that fails is skipped for `cooldown_seconds`, so an overloaded model
-    doesn't cost every request a 30-second timeout. If every remaining provider is cooling down, they're
-    tried anyway: a slow answer beats none.
+    doesn't cost every request a 30-second timeout. A rate-limited provider is skipped for as long as it
+    asked us to wait instead.
+
+    Last resort, when nothing else answered: providers that are cooling down are tried anyway (a slow answer
+    beats none), and a rate-limited one is waited for if that's at most `max_wait_seconds`. Groq's free tier
+    allows 8,000 tokens a minute, so a quick multi-step task often needs a few seconds' pause.
     """
 
-    def __init__(self, providers: list[LLMProvider], cooldown_seconds: float = 120, clock=time.monotonic):
+    def __init__(self, providers: list[LLMProvider], cooldown_seconds: float = 120, max_wait_seconds: float = 20,
+                 clock=time.monotonic, sleep=time.sleep):
         self.providers = providers
         self.cooldown_seconds = cooldown_seconds
+        self.max_wait_seconds = max_wait_seconds
         self.clock = clock
-        self._failed_at: dict[int, float] = {}
+        self.sleep = sleep  # the agent runs the router in a worker thread, so sleeping blocks nothing else
+        self._down_until: dict[int, float] = {}
+        self._rate_limited: set[int] = set()
 
     def configured(self) -> list[str]:
         return [f"{p.name}/{p.model}" for p in self.providers if p.is_configured()]
@@ -63,19 +73,30 @@ class LLMRouter:
 
     def _first_answer(self, call, trace: "_Generation", start: int = 0):
         reasons: list[str] = []
-        cooling: list[int] = []
+        second_chance: list[int] = []
         for index in range(start, len(self.providers)):
             label = self._label(self.providers[index])
             if not self.providers[index].is_configured():
                 reasons.append(f"{label}: no API key")
-            elif self._cooling_down(index):
-                reasons.append(f"{label}: skipped, failed {self.clock() - self._failed_at[index]:.0f}s ago")
-                cooling.append(index)
+            elif self._remaining(index) > 0:
+                reasons.append(f"{label}: skipped for {self._remaining(index):.0f}s more (failed recently)")
+                second_chance.append(index)
             else:
                 answer = self._try(call, index, reasons, trace)
                 if answer is not None:
                     return answer, index, reasons
-        for index in cooling:  # last resort
+                if index in self._rate_limited:
+                    second_chance.append(index)
+        # Last resort: nothing has answered.
+        for index in sorted(second_chance, key=self._remaining):
+            wait = self._remaining(index)
+            if index in self._rate_limited:
+                if wait > self.max_wait_seconds:
+                    continue  # asking again now would only be refused again
+                if wait > 0:
+                    reasons.append(f"{self._label(self.providers[index])}: waited {wait:.0f}s for its rate limit")
+                    log.info("Waiting %.1fs for %s's rate limit", wait, self._label(self.providers[index]))
+                    self.sleep(wait)
             answer = self._try(call, index, reasons, trace)
             if answer is not None:
                 return answer, index, reasons
@@ -98,19 +119,27 @@ class LLMRouter:
                 log.warning("LLM %s failed, trying next: %s", label, exc)
                 generation.update(level="ERROR", status_message=f"{type(exc).__name__}: {exc}"[:1000])
                 reasons.append(f"{label}: {exc}")
-                self._failed_at[index] = self.clock()
+                retry_after = exc.retry_after if isinstance(exc, RateLimited) else None
+                if retry_after is not None:
+                    self._rate_limited.add(index)
+                else:
+                    self._rate_limited.discard(index)
+                self._down_until[index] = self.clock() + (
+                    retry_after if retry_after is not None else self.cooldown_seconds
+                )
                 return None
             if isinstance(answer, AssistantTurn):
                 generation.update(output=answer.as_message(), model=answer.model or provider.model,
                                   usage_details=answer.usage or None)
             else:
                 generation.update(output={"role": "assistant", "content": answer})
-        self._failed_at.pop(index, None)
+        self._down_until.pop(index, None)
+        self._rate_limited.discard(index)
         return answer
 
-    def _cooling_down(self, index: int) -> bool:
-        failed_at = self._failed_at.get(index)
-        return failed_at is not None and self.clock() - failed_at < self.cooldown_seconds
+    def _remaining(self, index: int) -> float:
+        """Seconds until a provider that failed should be tried again (0 if it's available)."""
+        return max(0.0, self._down_until.get(index, 0.0) - self.clock())
 
     @staticmethod
     def _label(provider: LLMProvider) -> str:
