@@ -59,15 +59,15 @@ def test_turn_is_one_trace_with_generations_and_tools_under_the_agent(spans):
     llm = ScriptedLLM("gemini", [
         AssistantTurn("", [call("find_customers", name="test"), call("search_policies", query="SAR")],
                       model="gemini-3-flash", usage={"input": 120, "output": 15}),
-        AssistantTurn("Test Person is C00001 [1].", model="gemini-3-flash", usage={"input": 300, "output": 20}),
+        AssistantTurn("Customer C00001 matches [1].", model="gemini-3-flash", usage={"input": 300, "output": 20}),
     ])
-    ask([llm], question="Who is Test Person?")
+    ask([llm], question="Who is customer C00001?")
     by_name, all_spans = spans()
 
     root = by_name["answer-question"]
     assert root.attributes[TYPE] == "agent"
-    assert value(root, INPUT) == "Who is Test Person?"
-    assert value(root, OUTPUT) == "Test Person is C00001 [1]."
+    assert value(root, INPUT) == "Who is customer C00001?"
+    assert value(root, OUTPUT) == "Customer C00001 matches [1]."
     assert root.attributes["session.id"] == "session-1"
     assert len({s.context.trace_id for s in all_spans}) == 1
 

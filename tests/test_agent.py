@@ -35,6 +35,7 @@ class ScriptedLLM:
         self.script = list(script)
         self.seen: list[list[Message]] = []
         self.forced = []
+        self.offered: list[list[str]] = []
 
     def is_configured(self):
         return True
@@ -42,6 +43,7 @@ class ScriptedLLM:
     def chat(self, system, messages, tools, force_answer=False):
         self.seen.append(list(messages))
         self.forced.append(force_answer)
+        self.offered.append(sorted(t.name for t in tools))
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item

@@ -41,6 +41,7 @@ class PendingActionOut(BaseModel):
     server: str
     arguments: dict[str, Any]
     created_at: float
+    proposed_by: str
 
 
 class ChatResponse(BaseModel):
@@ -51,6 +52,8 @@ class ChatResponse(BaseModel):
     tool_calls: list[ToolStepOut]
     fallback_reasons: list[str]
     pending_actions: list[PendingActionOut]
+    trace_id: str | None = None
+    trace_url: str | None = None
 
 
 class ActionDecision(BaseModel):
@@ -60,7 +63,7 @@ class ActionDecision(BaseModel):
 
 class ActionOutcomeOut(BaseModel):
     action_id: str
-    status: Literal["done", "failed", "rejected", "expired"]
+    status: Literal["done", "failed", "rejected", "expired", "denied"]
     tool: str
     result: str
 
@@ -78,6 +81,37 @@ class HealthResponse(BaseModel):
     indexed_chunks: int | None  # None with embedded Qdrant, which the MCP server process holds open
     mcp_servers: dict[str, MCPServerOut]
     tracing: bool
+    auth: Literal["open", "api_key"]
+    pii_pseudonymization: bool
+
+
+class UserOut(BaseModel):
+    user_id: str
+    name: str
+    role: str
+    can_read_audit: bool
+    approvable_tools: list[str]
+
+
+class AuditEventOut(BaseModel):
+    id: int
+    ts: str
+    actor_id: str
+    actor_role: str
+    event: str
+    session_id: str | None
+    trace_id: str | None
+    details: dict[str, Any]
+    prev_hash: str
+    hash: str
+
+
+class AuditVerifyOut(BaseModel):
+    ok: bool
+    entries: int
+    latest_hash: str | None = None
+    broken_at: int | None = None
+    reason: str | None = None
 
 
 class IngestResponse(BaseModel):

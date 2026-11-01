@@ -19,6 +19,7 @@ class PendingAction:
     server: str
     arguments: dict[str, Any]
     created_at: float = field(default_factory=time.time)
+    proposed_by: str = ""
 
 
 class ApprovalQueue:
@@ -28,12 +29,18 @@ class ApprovalQueue:
         self._actions: dict[str, PendingAction] = {}
         self._lock = threading.Lock()
 
-    def add(self, tool: str, server: str, arguments: dict[str, Any]) -> PendingAction:
-        action = PendingAction(f"act_{uuid.uuid4().hex[:12]}", tool, server, dict(arguments), self.clock())
+    def add(self, tool: str, server: str, arguments: dict[str, Any], proposed_by: str = "") -> PendingAction:
+        action = PendingAction(f"act_{uuid.uuid4().hex[:12]}", tool, server, dict(arguments), self.clock(), proposed_by)
         with self._lock:
             self._expire()
             self._actions[action.id] = action
         return action
+
+    def peek(self, action_id: str) -> PendingAction | None:
+        """Look at an action without deciding it (e.g. to check the approver's role first)."""
+        with self._lock:
+            self._expire()
+            return self._actions.get(action_id)
 
     def take(self, action_id: str) -> PendingAction | None:
         """Remove and return the action, so a second click (or a replayed request) can't run it twice."""

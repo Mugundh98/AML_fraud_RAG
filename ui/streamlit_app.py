@@ -12,7 +12,8 @@ st.set_page_config(page_title="AML & Fraud Assistant", page_icon="🛡️", layo
 
 def api(method: str, path: str, **kwargs) -> dict:
     # LLM calls and re-indexing can take a while on a laptop CPU.
-    response = httpx.request(method, f"{API_URL}{path}", timeout=300, **kwargs)
+    headers = {"X-API-Key": st.session_state["api_key"]} if st.session_state.get("api_key") else {}
+    response = httpx.request(method, f"{API_URL}{path}", timeout=300, headers=headers, **kwargs)
     response.raise_for_status()
     return response.json()
 
@@ -47,6 +48,7 @@ STATUS_TEXT = {
     "failed": "⚠️ Approved, but it failed",
     "rejected": "❌ Rejected, nothing was done",
     "expired": "⌛ Expired or already decided, nothing was done",
+    "denied": "🔒 Your role can't approve this; it's still waiting for someone who can",
 }
 
 
@@ -64,6 +66,9 @@ def render_actions(message: dict) -> None:
                 else:
                     st.markdown(f"**{key}:** {', '.join(value) if isinstance(value, list) else value}")
             outcome = outcomes.get(action["id"])
+            if outcome and outcome["status"] == "denied":
+                st.markdown(STATUS_TEXT["denied"])
+                continue
             if outcome:
                 st.markdown(STATUS_TEXT[outcome["status"]])
                 link = _link(outcome["result"])
@@ -97,6 +102,42 @@ def render_meta(message: dict) -> None:
     if message.get("fallback_reasons"):
         reasons = [r if len(r) <= 90 else r[:90] + "…" for r in message["fallback_reasons"]]
         st.caption("Fallbacks and retries: " + " · ".join(reasons))
+    if message.get("trace_url"):
+        st.caption(f"[Trace in Langfuse]({message['trace_url']})")
+
+
+def sign_in(auth_mode: str) -> dict | None:
+    """Sidebar sign-in. Returns the signed-in user, or None (and shows the form) if there isn't one."""
+    if st.session_state.get("user"):
+        return st.session_state.user
+    if auth_mode == "open":
+        st.session_state.user = api("GET", "/me")
+        return st.session_state.user
+    key = st.text_input("API key", type="password", help="Ask your lead, or run `python -m scripts.create_user`.")
+    if st.button("Sign in", width="stretch") and key:
+        st.session_state.api_key = key
+        try:
+            st.session_state.user = api("GET", "/me")
+            st.rerun()
+        except httpx.HTTPStatusError:
+            st.session_state.api_key = None
+            st.error("That key isn't valid.")
+    return None
+
+
+def render_audit() -> None:
+    st.subheader("Audit log")
+    check = api("GET", "/audit/verify")
+    if check["ok"]:
+        st.success(f"Hash chain intact: {check['entries']} entries. Latest hash `{(check['latest_hash'] or '')[:16]}…`")
+    else:
+        st.error(f"Hash chain broken at entry {check['broken_at']} ({check['reason']}).")
+    rows = api("GET", "/audit", params={"limit": 100})
+    st.dataframe(
+        [{"id": r["id"], "time (UTC)": r["ts"][:19].replace("T", " "), "who": f"{r['actor_id']} ({r['actor_role']})",
+          "event": r["event"], "details": json.dumps(r["details"])[:200]} for r in rows],
+        width="stretch", hide_index=True,
+    )
 
 
 with st.sidebar:
@@ -109,6 +150,7 @@ with st.sidebar:
         if health["indexed_chunks"] is not None:
             st.write("**Indexed chunks:**", health["indexed_chunks"])
         st.write("**Tracing:**", "Langfuse" if health["tracing"] else "off")
+        st.write("**PII:**", "pseudonymized for the LLM and traces" if health["pii_pseudonymization"] else "sent as is")
         for name, server in health["mcp_servers"].items():
             if server["error"]:
                 st.error(f"MCP `{name}`: {server['error']}")
@@ -118,6 +160,21 @@ with st.sidebar:
     except httpx.HTTPError:
         st.error(f"Backend not reachable at {API_URL}. Start it with `uvicorn app.api.main:app`.")
         st.stop()
+
+    st.header("You")
+    user = sign_in(health["auth"])
+    if user is None:
+        st.stop()
+    st.write(f"**{user['name']}** · {user['role'].replace('_', ' ')}")
+    if user["approvable_tools"]:
+        st.caption("You can approve: " + ", ".join(user["approvable_tools"]))
+    if health["auth"] == "open":
+        st.caption("Open mode: no users file, so everyone is a local lead.")
+    elif st.button("Sign out", width="stretch"):
+        st.session_state.clear()
+        st.rerun()
+    if user["can_read_audit"]:
+        st.toggle("Show audit log", key="show_audit")
 
     if st.button("Re-index documents", width="stretch"):
         try:
@@ -131,6 +188,10 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.session_id = str(uuid.uuid4())  # a new conversation is a new Langfuse session
         st.rerun()
+
+if st.session_state.get("show_audit"):
+    render_audit()
+    st.stop()
 
 st.title("AML & Fraud Assistant")
 st.caption("An agent that uses MCP tools: policy documents, the transaction graph, the web, your calendar and "

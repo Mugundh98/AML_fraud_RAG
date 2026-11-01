@@ -26,7 +26,7 @@ A learning project for **RAG** and **MCP**, built as an enterprise-style AML and
 | 2 | Synthetic transactions (≤ 50k rows) in Neo4j + our own `aml-data-mcp` server | **Done** |
 | 3 | Agent loop that routes between documents and the graph via MCP | **Done** |
 | 4 | Tavily, Google Calendar, Slack MCP servers, with confirmation before any write | **Done** |
-| 5 | Hardening: Langfuse tracing ✓, audit log, roles, PII redaction, evaluation set | In progress |
+| 5 | Hardening: Langfuse tracing ✓, users and roles ✓, audit log ✓, PII pseudonymization ✓, evaluation set | In progress |
 
 ## Phase 1: how it works
 
@@ -252,6 +252,83 @@ What the first traces showed, and what changed:
   - **Compact tool schemas** (`compact_schema` in `app/agent/mcp_hub.py`): the labels pydantic adds to every field, `"default": null` and `anyOf [X, null]` wrappers are dropped, and Tavily's search tool exposes 5 of its 17 options. Definitions went from 16,290 to 10,579 characters, but Groq's first-step input only fell from 2,804 to 2,508 tokens (−11%): the descriptions that tell the model when to use each tool are most of the cost, and they stay.
   - **Waiting out short rate limits** (`app/llm/router.py`): providers report "try again in N seconds" as `RateLimited`. A rate-limited provider is benched for exactly that long (not the 2-minute circuit-breaker cooldown), and when no other model is left the router waits up to 20 seconds and retries. The same investigation now pauses ~4 seconds on step 3 and finishes.
 - **Groq has no price in Langfuse**: `openai/gpt-oss-120b` isn't in its default model list, so those generations have tokens but no cost. Add a custom model definition in Langfuse (Settings > Models) if you want one.
+
+## Phase 5: users, roles, audit log and PII
+
+### Users and roles (`app/auth.py`)
+
+Each analyst has an API key, sent as the `X-API-Key` header; the UI asks for it in the sidebar. Only SHA-256 hashes are stored, in `secrets/users.json` (git ignores `secrets/`).
+
+```bash
+python -m scripts.create_user --name "Priya Shah" --role senior_analyst
+```
+
+| Role | Read-only tools | Book meetings (`create_event`) | Escalate to Slack (`post_message`) | Read the audit log |
+|---|---|---|---|---|
+| `analyst` (Level 1) | ✓ | ✓ | | |
+| `senior_analyst` (Level 2) | ✓ | ✓ | ✓ | |
+| `lead` | ✓ | ✓ | ✓ | ✓ |
+
+The model is only offered the tools the signed-in analyst may use, and is told which ones are withheld, so a Level 1 analyst who asks to escalate gets "only a senior analyst or lead can escalate" and a draft to hand over, not a proposal they can't approve. Approval is checked again on the server; a denied approval leaves the action waiting for someone who can approve it.
+
+Without a users file the API runs in **open mode**: everyone is one local lead, and `/health` and the sidebar say so.
+
+### Audit log (`app/audit.py`)
+
+An append-only SQLite table (`storage/audit.db`) with real names, since it's the bank's own record: every answered question with the tools and arguments used, every proposed action, every approval, rejection and denial, failed sign-ins, re-indexing, and every read of the audit log itself. Entries are linked into a **hash chain**: each stores the SHA-256 of its content plus the previous entry's hash, so editing or deleting a past entry breaks verification from that point on. Leads can see the log and its verification in the UI (**Show audit log**), or via `GET /audit` and `GET /audit/verify`. The chain makes tampering visible, not impossible: someone who can rewrite the whole file can rebuild it, which is why real systems also copy the latest hash somewhere else.
+
+Each audit entry stores the Langfuse trace ID, so a decision can be traced back to exactly what the model saw.
+
+### PII pseudonymization (`app/agent/pii.py`)
+
+The LLM providers and Langfuse never see customer names or identifiers:
+
+```
+graph tool result     {"name": "Jessica Martin", "phone": "+1-892-555-0194"}
+what the model sees   {"name": "<NAME_1>",       "phone": "<PHONE_1>"}
+model calls           check_structuring(...) / find_customers(name="<NAME_1>")  ─► our server gets "Jessica Martin"
+model answers         "<NAME_1> made 5 deposits just under $10,000..."
+analyst reads         "Jessica Martin made 5 deposits just under $10,000..."
+```
+
+- **What's PII**: customer, account-holder and counterparty names (branches excluded: "Miami branch" is a place), the phone, device and address values behind shared identifiers, and emails and phone numbers anywhere in text.
+- **Per conversation**: `<NAME_1>` means the same person in every turn, and earlier answers in the history are re-pseudonymized before they go back to the model.
+- **Outside services get nothing**: each MCP server declares `returns_pii` / `receives_pii`. Placeholders are swapped back for real values only for our own servers; a web search containing a placeholder is refused, so customer data can't leave through it.
+- **Last line of defence**: the Langfuse exporter masks every real value the app has pseudonymized as `[PII]`. In live testing that caught a leak the first layer missed (a name inside a transaction description, scanned before its own field was), which is now fixed: redaction is two-pass, and a regression test covers it. A clean trace now has zero `[PII]` masks.
+- **Limits**: a name the analyst types before any tool has returned it goes to the model as typed, and free text isn't scanned for names it hasn't seen. Production systems add a named-entity detector for both. Turn it all off with `PII_PSEUDONYMIZATION=false`.
+
+### Evaluation (`app/evaluation.py`, `scripts/evaluate.py`)
+
+A 12-item Langfuse dataset, `aml-investigations-v0`, built from the generator's answer key (`scenarios.csv`), so the expected outputs are ground truth by construction:
+
+| Items | What they test |
+|---|---|
+| 7 positive, one per typology (S04, S07, S10, S11, S14, S17, S18; 5 of them have no alert) | finds the planted activity and names the typology |
+| 2 ordinary customers | doesn't accuse people who did nothing |
+| 1 false positive: the business the structuring scan flags (near-threshold deposits that match its profile) | judgement, not just pattern matching |
+| 2 policy facts (SAR deadline, CTR threshold) | answers from the knowledge base |
+
+Each review question ends with "Finish with one line: Verdict: suspicious / not suspicious…", so scoring is plain code (free, fast, reproducible, no LLM judge):
+
+| Score | Meaning |
+|---|---|
+| `verdict_correct` | the final verdict line matches the answer key |
+| `typology_named` | the answer names the planted typology |
+| `right_tool_used` | the matching detection tool was called (e.g. `find_circular_flows` for a cycle) |
+| `facts_mentioned` | required IDs or facts appear (account ID, "30" days, "$10,000") |
+| `tool_calls` | how many tool calls it took |
+
+Scores land on each item's trace, and the run gets averages, so runs can be compared side by side in Langfuse (**Datasets > aml-investigations-v0**). Each item runs the full agent against the `aml-data` server only, as an analyst, one item at a time (~40-60 model calls per run).
+
+```bash
+python -m scripts.evaluate show                      # review the items
+python -m scripts.evaluate upload                    # create or update the dataset (idempotent)
+python -m scripts.evaluate run --name my-change      # run an experiment
+```
+
+**Baseline (`agent-baseline`, 1 Nov 2026, answered by Gemini Flash-Lite after Flash hit its free daily quota):** 12/12. Verdict correct on all 10 reviews (7 planted cases, 2 ordinary customers, the false-positive business), typology named and the right detection tool used on all 7 positives, both policy facts right; 4.2 tool calls per item on average.
+
+A perfect score mostly says v0 is too easy to tell versions apart: every question names the customer and account, and the agent runs the same battery of checks each time (profile, transactions, counterparties, structuring). The next dataset version should add harder items, such as a case found only through a linked customer, a review starting from just a name, or a borderline business, and track `tool_calls` to catch an agent that gets right answers by calling everything.
 
 ## Adding documents
 

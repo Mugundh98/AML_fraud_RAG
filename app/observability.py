@@ -21,6 +21,7 @@ import re
 from langfuse import Langfuse
 from langfuse.types import MaskOtelSpansParams, MaskOtelSpansResult, OtelSpanPatch
 
+from app.agent.pii import mask_known
 from app.config import Settings
 
 log = logging.getLogger(__name__)
@@ -42,14 +43,16 @@ _client: Langfuse | None = None
 
 
 def mask_secrets(*, params: MaskOtelSpansParams) -> MaskOtelSpansResult | None:
-    """Export-stage masking: replace anything that looks like a credential in any string attribute."""
+    """Export-stage masking, the last step before data leaves the process: credentials become [REDACTED],
+    and any customer PII the app has pseudonymized becomes [PII] (traces should only hold placeholders)."""
     patches = {}
     for identifier, span in params.spans.items():
-        changed = {
-            key: SECRET.sub("[REDACTED]", value)
-            for key, value in span.attributes.items()
-            if isinstance(value, str) and SECRET.search(value)
-        }
+        changed = {}
+        for key, value in span.attributes.items():
+            if isinstance(value, str):
+                masked = mask_known(SECRET.sub("[REDACTED]", value))
+                if masked != value:
+                    changed[key] = masked
         if changed:
             patches[identifier] = OtelSpanPatch(set_attributes=changed)
     return MaskOtelSpansResult(span_patches=patches) if patches else None

@@ -53,10 +53,15 @@ class Settings(BaseSettings):
     langfuse_base_url: str = "https://cloud.langfuse.com"
     langfuse_tracing_environment: str = "development"
 
+    # Phase 5: users (API-key hashes), the audit log, and PII pseudonymization.
+    users_file: Path = PROJECT_ROOT / "secrets" / "users.json"
+    audit_db: Path = PROJECT_ROOT / "storage" / "audit.db"
+    pii_pseudonymization: bool = True
+
     docs_dir: Path = PROJECT_ROOT / "data" / "docs"
     api_url: str = "http://localhost:8000"
 
-    @field_validator("google_client_secret_file", "google_token_file")
+    @field_validator("google_client_secret_file", "google_token_file", "users_file", "audit_db")
     @classmethod
     def _relative_to_project(cls, path: Path) -> Path:
         return path if path.is_absolute() else PROJECT_ROOT / path

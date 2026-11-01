@@ -32,6 +32,11 @@ class ServerConfig:
     # Per tool, the only parameters the model sees (the server uses its defaults for the rest). Every tool
     # definition is sent with every model call, so unused options cost tokens on each step.
     params: dict[str, set[str]] = field(default_factory=dict)
+    # PII handling (app/agent/pii.py). returns_pii: results hold customer data, so the model gets placeholders.
+    # receives_pii: placeholders in the model's arguments are swapped back for real values; a server that
+    # doesn't receive PII (third-party, e.g. web search) gets refused calls instead of customer data.
+    returns_pii: bool = False
+    receives_pii: bool = False
 
 
 @dataclass
@@ -61,7 +66,7 @@ def default_servers(settings: Settings, project_root: Path) -> dict[str, ServerC
     def local(module: str) -> StdioServerParameters:
         return StdioServerParameters(command=sys.executable, args=["-m", module], cwd=str(project_root))
 
-    servers = {"aml-data": ServerConfig(local("mcp_servers.aml_data"))}
+    servers = {"aml-data": ServerConfig(local("mcp_servers.aml_data"), returns_pii=True, receives_pii=True)}
     if settings.tavily_api_key:
         from mcp.client.streamable_http import streamable_http_client
         from mcp.shared._httpx_utils import create_mcp_http_client
@@ -80,9 +85,10 @@ def default_servers(settings: Settings, project_root: Path) -> dict[str, ServerC
             },
         )
     if settings.google_client_secret_file.exists():
-        servers["google-calendar"] = ServerConfig(local("mcp_servers.google_calendar"))
+        servers["google-calendar"] = ServerConfig(local("mcp_servers.google_calendar"), returns_pii=True,
+                                                  receives_pii=True)
     if settings.slack_bot_token:
-        servers["slack"] = ServerConfig(local("mcp_servers.slack"))
+        servers["slack"] = ServerConfig(local("mcp_servers.slack"), receives_pii=True)  # the bank's own Slack
     return servers
 
 
@@ -176,6 +182,12 @@ class MCPHub:
 
     def server_of(self, name: str) -> str:
         return self._tools[name].server
+
+    def approval_tools(self) -> list[str]:
+        return [name for name, tool in self._tools.items() if tool.needs_approval]
+
+    def config_of(self, name: str) -> ServerConfig:
+        return self.servers[self._tools[name].server]
 
     async def call(self, name: str, arguments: dict[str, Any], approved: bool = False) -> ToolResult:
         if name not in self._tools:
