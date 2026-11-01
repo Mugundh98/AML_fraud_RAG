@@ -18,5 +18,9 @@ qdrant-client[fastembed]>=1.12
 # Document loading
 pypdf>=5.0
 
+# Graph database + MCP (phase 2). mcp 2.x renamed FastMCP to MCPServer.
+neo4j>=5.26
+mcp>=2.3,<3
+
 # Tests
 pytest>=8.3

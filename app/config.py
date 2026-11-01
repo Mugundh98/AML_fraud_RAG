@@ -32,7 +32,9 @@ class Settings(BaseSettings):
     neo4j_uri: str = ""
     neo4j_username: str = "neo4j"
     neo4j_password: str = ""
+    neo4j_database: str = "neo4j"
     max_transactions: int = 50_000
+    synthetic_dir: Path = PROJECT_ROOT / "data" / "synthetic"
 
     docs_dir: Path = PROJECT_ROOT / "data" / "docs"
     api_url: str = "http://localhost:8000"

@@ -5,3 +5,5 @@ __pycache__/
 .env
 storage/
 data/raw/
+# Regenerate with: python -m scripts.generate_data
+data/synthetic/

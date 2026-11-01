@@ -21,7 +21,12 @@ class SearchHit:
 
 
 class DocStore:
-    """Qdrant collection with hybrid search: dense embeddings + BM25 sparse vectors, fused with RRF."""
+    """Qdrant collection with hybrid search: dense embeddings + BM25 sparse vectors, fused with DBSF.
+
+    DBSF (distribution-based score fusion) normalises each search's scores and adds them, so a strong
+    keyword match isn't outvoted by a mediocre dense one. Plain RRF only looks at ranks: "structuring red
+    flags" ranked "Elder financial exploitation" first, because that chunk's title contains "Red Flags".
+    """
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -127,7 +132,7 @@ class DocStore:
                     limit=limit * 4,
                 ),
             ],
-            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            query=models.FusionQuery(fusion=models.Fusion.DBSF),
             limit=limit,
             with_payload=True,
         )
