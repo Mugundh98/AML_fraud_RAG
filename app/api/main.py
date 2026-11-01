@@ -13,6 +13,7 @@ from app.api.schemas import (
 )
 from app.config import PROJECT_ROOT, get_settings
 from app.llm import Message, build_router
+from app.observability import init_tracing
 from app.rag.ingest import ingest_directory
 from app.rag.store import DocStore
 
@@ -26,6 +27,7 @@ store_lock = threading.Lock()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    tracing = init_tracing(settings)
     router = build_router(settings)
     # Embedded Qdrant can only be opened by one process, and the aml-data MCP server needs it for
     # search_policies. So the API only opens the store itself when it's Qdrant Cloud.
@@ -33,10 +35,12 @@ async def lifespan(app: FastAPI):
     approvals = ApprovalQueue(ttl_seconds=settings.approval_ttl_minutes * 60)
     # The MCP servers stay connected for as long as the API is up.
     async with MCPHub(default_servers(settings, PROJECT_ROOT)) as hub:
-        state.update(settings=settings, router=router, store=store, hub=hub, agent=Agent(hub, router, approvals))
+        state.update(settings=settings, router=router, store=store, hub=hub, agent=Agent(hub, router, approvals),
+                     tracing=tracing)
         yield
     if store:
         store.client.close()
+    tracing.shutdown()  # send any buffered spans before the process exits
 
 
 app = FastAPI(title="AML & Fraud Assistant", lifespan=lifespan)
@@ -55,20 +59,21 @@ def health():
         vector_store="qdrant-cloud" if store else "qdrant-local",
         indexed_chunks=count,
         mcp_servers={name: asdict(status) for name, status in state["hub"].status.items()},
+        tracing=bool(state["settings"].langfuse_public_key and state["settings"].langfuse_secret_key),
     )
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     history = [Message(turn.role, turn.content) for turn in request.history]
-    result = await state["agent"].answer(request.message, history)
+    result = await state["agent"].answer(request.message, history, request.session_id)
     return ChatResponse(**asdict(result))
 
 
 @app.post("/actions/{action_id}", response_model=ActionOutcomeOut)
 async def decide(action_id: str, decision: ActionDecision):
     """Approve or reject an action the agent proposed. Approving runs it exactly as proposed, once."""
-    outcome = await state["agent"].execute(action_id, decision.approve)
+    outcome = await state["agent"].execute(action_id, decision.approve, decision.session_id)
     return ActionOutcomeOut(**asdict(outcome))
 
 

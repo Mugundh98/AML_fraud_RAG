@@ -26,7 +26,7 @@ A learning project for **RAG** and **MCP**, built as an enterprise-style AML and
 | 2 | Synthetic transactions (≤ 50k rows) in Neo4j + our own `aml-data-mcp` server | **Done** |
 | 3 | Agent loop that routes between documents and the graph via MCP | **Done** |
 | 4 | Tavily, Google Calendar, Slack MCP servers, with confirmation before any write | **Done** |
-| 5 | Hardening: audit log, roles, PII redaction, Langfuse tracing, evaluation set | Next |
+| 5 | Hardening: Langfuse tracing ✓, audit log, roles, PII redaction, evaluation set | In progress |
 
 ## Phase 1: how it works
 
@@ -218,6 +218,38 @@ In the terminal, `scripts.ask` asks y/n for each proposed action:
 ```bash
 python -m scripts.ask "Escalate alert AL-0002 to the compliance Slack channel with a short summary."
 ```
+
+## Phase 5: tracing with Langfuse
+
+Every chat turn is one Langfuse trace (Python SDK v5, built on OpenTelemetry), set up following the
+[Langfuse skill](https://github.com/langfuse/skills)'s instrumentation guide and best-practices checklist:
+
+```
+answer-question (agent)            input: the question · output: the answer · session: the conversation
+├── plan-next-step (generation)    level ERROR: Gemini Flash 504, so the router fell back
+├── plan-next-step (generation)    gemini-3.5-flash-lite · 4,689 in / 76 out tokens · tool_calls ×3
+├── get_account_transactions (tool)
+├── check_structuring (tool)
+├── search_policies (retriever)    the passages, with the numbers the model cited
+└── plan-next-step (generation)    the answer · 4,013 tokens read from Gemini's cache
+```
+
+- **Generations** are recorded per attempt in the router (`app/llm/router.py`), so fallbacks are visible. Each has the messages in OpenAI format, the assistant message out (with `tool_calls` and, when the model shares it, `reasoning_content`), the model version that actually answered (aliases like `gemini-flash-latest` resolve to e.g. `gemini-3.5-flash-lite`, which Langfuse can price), and token usage as non-overlapping buckets (`input`, `output`, `cache_read_input_tokens`).
+- **Tools** (`app/agent/loop.py`) are siblings of the generation that requested them, with the arguments, result, MCP server and tool call ID. A proposed write shows `awaiting_approval`; the decision is its own `decide-action` trace in the same session.
+- **Sessions**: the UI sends one session ID per conversation, so turns and approval decisions group together. `scripts.ask` doesn't set one, since a single question isn't a conversation.
+- **Secrets are masked at export** (`app/observability.py`): any string that looks like an API key or token is replaced with `[REDACTED]` before it leaves the process. (Customer data isn't masked yet; that's the PII-redaction step of phase 5. All bank data here is synthetic.)
+- **Environment** is `development`, so experiments stay out of production views.
+- Tracing is off unless both Langfuse keys are set; the code then uses a no-op client.
+
+See the latest trace without opening Langfuse:
+
+```bash
+python -m scripts.show_trace
+```
+
+Two things the first traces showed:
+- **Groq's free tier allows 8,000 tokens a minute**, and an agent step is about 3,900 tokens (most of it the 15 tool descriptions), so Groq-only conversations hit 429 errors after two steps.
+- **Groq has no price in Langfuse**: `openai/gpt-oss-120b` isn't in its default model list, so those generations have tokens but no cost. Add a custom model definition in Langfuse (Settings > Models) if you want one.
 
 ## Adding documents
 

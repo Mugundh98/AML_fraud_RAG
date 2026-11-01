@@ -13,10 +13,19 @@ from app.agent.loop import Agent
 from app.agent.mcp_hub import MCPHub, default_servers
 from app.config import PROJECT_ROOT, get_settings
 from app.llm import build_router
+from app.observability import init_tracing
 
 
 async def main(question: str) -> None:
     settings = get_settings()
+    tracing = init_tracing(settings)
+    try:
+        await ask(settings, question)
+    finally:
+        tracing.flush()  # a short-lived script must send its spans before exiting
+
+
+async def ask(settings, question: str) -> None:
     async with MCPHub(default_servers(settings, PROJECT_ROOT)) as hub:
         for name, status in hub.status.items():
             approval = f", {len(status.approval_tools)} need approval" if status.approval_tools else ""

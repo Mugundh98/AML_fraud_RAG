@@ -88,4 +88,6 @@ Sign up at https://tavily.com. The free plan has 1,000 credits a month, no card 
 ## Phase 5
 
 ### 8. Langfuse (tracing)
-Sign up at https://cloud.langfuse.com for the free Hobby plan.
+1. Sign up at https://cloud.langfuse.com for the free Hobby plan and create a project.
+2. In the project, **Settings > API Keys > Create new API keys**, then put them in `.env` as `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`. Set `LANGFUSE_BASE_URL` to the region your project is in (`https://cloud.langfuse.com` for EU, `https://us.cloud.langfuse.com` for US).
+3. Restart the API. The sidebar shows **Tracing: Langfuse**, and every chat turn appears under **Tracing** in Langfuse.

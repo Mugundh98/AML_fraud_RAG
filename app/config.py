@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     # Pending write actions (Slack posts, calendar events) expire if nobody approves them.
     approval_ttl_minutes: int = 30
 
+    # Phase 5: Langfuse tracing. Off unless both keys are set.
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_base_url: str = "https://cloud.langfuse.com"
+    langfuse_tracing_environment: str = "development"
+
     docs_dir: Path = PROJECT_ROOT / "data" / "docs"
     api_url: str = "http://localhost:8000"
 

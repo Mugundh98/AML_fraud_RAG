@@ -22,6 +22,7 @@ pypdf>=5.0
 neo4j>=5.26
 mcp>=2.3,<3
 google-auth-oauthlib>=1.2
+langfuse>=5.1,<6
 
 # Tests
 pytest>=8.3

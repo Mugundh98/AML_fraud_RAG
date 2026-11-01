@@ -15,9 +15,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+from langfuse import propagate_attributes
+
 from app.agent.approvals import ApprovalQueue, PendingAction
 from app.agent.mcp_hub import MCPHub, ToolResult
 from app.llm import LLMRouter, Message, NoProviderAvailable, ToolCall
+from app.observability import langfuse
 from app.rag.citations import Source, cited_sources, normalize_citations
 
 log = logging.getLogger(__name__)
@@ -104,7 +107,25 @@ class Agent:
         offset = now.strftime("%z")
         return SYSTEM_PROMPT.format(today=now.strftime("%A %d %B %Y"), utc_offset=f"{offset[:3]}:{offset[3:]}")
 
-    async def answer(self, question: str, history: list[Message]) -> AgentAnswer:
+    async def answer(self, question: str, history: list[Message], session_id: str | None = None) -> AgentAnswer:
+        """Answer one question. Traced as one Langfuse trace; `session_id` groups a conversation's turns."""
+        with propagate_attributes(trace_name="answer-question", session_id=session_id, tags=["chat"]), \
+                langfuse().start_as_current_observation(
+                    as_type="agent", name="answer-question", input=question,
+                    metadata={"history_messages": len(history)},
+                ) as root:
+            result = await self._answer(question, history)
+            root.update(output=result.answer, metadata={
+                "provider": result.provider, "model": result.model,
+                "rounds": max((s.round for s in result.tool_calls), default=0),
+                "tools_called": [s.tool for s in result.tool_calls],
+                "cited_sources": [s.source for s in result.sources],
+                "pending_action_ids": [a.id for a in result.pending_actions],
+                "fallback_reasons": result.fallback_reasons,
+            })
+            return result
+
+    async def _answer(self, question: str, history: list[Message]) -> AgentAnswer:
         messages = history[-MAX_HISTORY_MESSAGES:] + [Message("user", question)]
         tools = self.hub.specs()
         system = self.system_prompt()
@@ -147,17 +168,48 @@ class Agent:
 
         raise AssertionError("unreachable: the last round always returns")
 
-    async def execute(self, action_id: str, approve: bool) -> ActionOutcome:
-        """The analyst's decision on a pending action. Approving runs the tool with the stored arguments."""
+    async def execute(self, action_id: str, approve: bool, session_id: str | None = None) -> ActionOutcome:
+        """The analyst's decision on a pending action. Approving runs the tool with the stored arguments.
+
+        Traced as its own trace in the chat's session, so the decision sits next to the turn that proposed it.
+        """
+        with propagate_attributes(trace_name="decide-action", session_id=session_id, tags=["approval"]), \
+                langfuse().start_as_current_observation(
+                    as_type="span", name="decide-action",
+                    input={"action_id": action_id, "decision": "approve" if approve else "reject"},
+                ) as root:
+            outcome = await self._decide(action_id, approve)
+            root.update(output={"status": outcome.status, "tool": outcome.tool},
+                        level="ERROR" if outcome.status == "failed" else None)
+            return outcome
+
+    async def _decide(self, action_id: str, approve: bool) -> ActionOutcome:
         action = self.approvals.take(action_id)
         if action is None:
             return ActionOutcome(action_id, "expired")
         if not approve:
             log.info("action %s (%s) rejected", action_id, action.tool)
             return ActionOutcome(action_id, "rejected", action.tool)
-        result = await self.hub.call(action.tool, action.arguments, approved=True)
+        result = await self._call_tool(action.tool, action.arguments, call_id=action.id, approved=True)
         log.info("action %s (%s) approved -> %s", action_id, action.tool, "ok" if result.ok else "error")
         return ActionOutcome(action_id, "done" if result.ok else "failed", action.tool, result.text)
+
+    async def _call_tool(self, name: str, arguments: dict[str, Any], call_id: str, approved: bool = False,
+                         sources: list[Source] | None = None, round_: int = 0) -> ToolResult:
+        """Run one MCP tool, traced as a `retriever` (knowledge-base search) or `tool` observation."""
+        server = self.hub.server_of(name) if self.hub.has_tool(name) else None
+        with langfuse().start_as_current_observation(
+            as_type="retriever" if name == "search_policies" else "tool", name=name, input=arguments,
+            metadata={"tool_call_id": call_id, "mcp_server": server, "round": round_, "approved": approved},
+        ) as observation:
+            result = await self.hub.call(name, arguments, approved=approved)
+            if result.ok and name == "search_policies" and result.data and sources is not None:
+                result = _number_passages(result.data, sources)  # record the numbers the model actually sees
+            observation.update(
+                output=result.data if result.data is not None else result.text,
+                level=None if result.ok else "ERROR", status_message=None if result.ok else result.text[:1000],
+            )
+        return result
 
     async def _run(self, call: ToolCall, round_: int, sources: list[Source],
                    pending: dict[str, PendingAction]) -> tuple[str, ToolStep]:
@@ -167,15 +219,19 @@ class Agent:
                 pending[key] = self.approvals.add(call.name, self.hub.server_of(call.name), call.arguments)
             note = (f"NOT RUN YET: waiting for the analyst's approval (action {pending[key].id}). "
                     "They can see the exact arguments. Don't call it again; tell them what you proposed.")
+            with langfuse().start_as_current_observation(
+                as_type="tool", name=call.name, input=call.arguments,
+                output={"status": "awaiting_approval", "action_id": pending[key].id},
+                metadata={"tool_call_id": call.id, "mcp_server": self.hub.server_of(call.name), "round": round_},
+            ):
+                pass
             return note, ToolStep(call.name, call.arguments, True, "Waiting for your approval", 0, round_, True)
 
         started = time.perf_counter()
-        result = await self.hub.call(call.name, call.arguments)
+        result = await self._call_tool(call.name, call.arguments, call_id=call.id, sources=sources, round_=round_)
         duration_ms = round((time.perf_counter() - started) * 1000)
         log.info("tool %s(%s) -> %s in %d ms", call.name, call.arguments, "ok" if result.ok else "error", duration_ms)
 
-        if result.ok and call.name == "search_policies" and result.data:
-            result = _number_passages(result.data, sources)
         content = result.text
         if len(content) > self.max_result_chars:
             content = (content[: self.max_result_chars]
@@ -189,9 +245,8 @@ class Agent:
                            reasons: list[str]) -> AgentAnswer:
         """No model could answer: still show the knowledge-base passages, as phase 1 did."""
         if not sources and self.hub.has_tool("search_policies"):
-            result = await self.hub.call("search_policies", {"query": question, "top_k": 5})
-            if result.ok and result.data:
-                _number_passages(result.data, sources)
+            await self._call_tool("search_policies", {"query": question, "top_k": 5}, call_id="fallback-search",
+                                  sources=sources)
         answer = "No LLM is available right now"
         answer += ", so here are the most relevant passages instead." if sources else ", and no passages were found."
         return AgentAnswer(answer, "none", "", sources, steps, reasons)

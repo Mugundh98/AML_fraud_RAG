@@ -32,6 +32,8 @@ class GeminiProvider:
             temperature=self.temperature,
             # We run tools ourselves (through MCP), so the SDK must not try to call Python functions.
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            # Thought summaries, so traces show why the model chose its tools.
+            thinking_config=types.ThinkingConfig(include_thoughts=True),
         )
         if tools:
             config.tools = [types.Tool(function_declarations=[
@@ -62,7 +64,11 @@ class GeminiProvider:
         text = "".join(p.text for p in parts if p.text and not p.thought)
         if not text and not calls:
             raise RuntimeError("empty response (possibly blocked by safety filters)")
-        return AssistantTurn(text=text, tool_calls=calls)
+        return AssistantTurn(
+            text=text, tool_calls=calls, model=response.model_version or self.model,
+            usage=_usage(response.usage_metadata),
+            reasoning="".join(p.text for p in parts if p.text and p.thought),
+        )
 
     def to_contents(self, messages: list[Message]) -> list:
         from google.genai import types
@@ -109,3 +115,15 @@ class GeminiProvider:
                 ),
             )
         return self._client
+
+
+def _usage(meta) -> dict[str, int]:
+    if meta is None:
+        return {}
+    cached = meta.cached_content_token_count or 0
+    # Thinking is billed as output, so it goes in the output bucket for correct cost.
+    result = {"input": (meta.prompt_token_count or 0) - cached,
+              "output": (meta.candidates_token_count or 0) + (meta.thoughts_token_count or 0)}
+    if cached:
+        result["cache_read_input_tokens"] = cached
+    return result

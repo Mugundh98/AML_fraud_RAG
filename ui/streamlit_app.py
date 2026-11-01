@@ -1,5 +1,6 @@
 import json
 import os
+import uuid
 
 import httpx
 import streamlit as st
@@ -75,7 +76,8 @@ def render_actions(message: dict) -> None:
             for column, approved, text in ((approve, True, "Approve"), (reject, False, "Reject")):
                 if column.button(text, key=f"{action['id']}-{text}", type="primary" if approved else "secondary",
                                  width="stretch"):
-                    outcome = api("POST", f"/actions/{action['id']}", json={"approve": approved})
+                    outcome = api("POST", f"/actions/{action['id']}",
+                                  json={"approve": approved, "session_id": st.session_state.session_id})
                     outcomes[action["id"]] = outcome
                     # Recorded in the conversation, so the agent knows on the next question what happened.
                     message["content"] += f"\n\n_{label}: {STATUS_TEXT[outcome['status']].split(' ', 1)[1].lower()}._"
@@ -106,6 +108,7 @@ with st.sidebar:
         st.write("**Vector store:**", health["vector_store"])
         if health["indexed_chunks"] is not None:
             st.write("**Indexed chunks:**", health["indexed_chunks"])
+        st.write("**Tracing:**", "Langfuse" if health["tracing"] else "off")
         for name, server in health["mcp_servers"].items():
             if server["error"]:
                 st.error(f"MCP `{name}`: {server['error']}")
@@ -126,6 +129,7 @@ with st.sidebar:
 
     if st.button("Clear chat", width="stretch"):
         st.session_state.messages = []
+        st.session_state.session_id = str(uuid.uuid4())  # a new conversation is a new Langfuse session
         st.rerun()
 
 st.title("AML & Fraud Assistant")
@@ -143,6 +147,7 @@ EXAMPLES = [
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+    st.session_state.session_id = str(uuid.uuid4())
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
@@ -171,7 +176,8 @@ if question:
     with st.chat_message("assistant"):
         with st.spinner("Working: the agent may call several tools…"):
             try:
-                result = api("POST", "/chat", json={"message": question, "history": history})
+                result = api("POST", "/chat", json={"message": question, "history": history,
+                                                    "session_id": st.session_state.session_id})
             except httpx.HTTPError as exc:
                 result = {"answer": f"Request failed: {exc}", "provider": "none", "model": "", "sources": []}
     st.session_state.messages.append({**result, "role": "assistant", "content": result["answer"]})

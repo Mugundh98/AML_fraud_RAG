@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -35,6 +36,20 @@ class ToolSpec:
 class AssistantTurn:
     text: str
     tool_calls: list[ToolCall] = field(default_factory=list)
+    # For tracing: the exact model that answered (aliases like gemini-flash-latest resolve to a version),
+    # token counts as non-overlapping Langfuse usage buckets, and the model's thinking if it shares it.
+    model: str = ""
+    usage: dict[str, int] = field(default_factory=dict)
+    reasoning: str = ""
+
+    def as_message(self) -> dict:
+        """OpenAI-style assistant message, the format Langfuse renders as a conversation."""
+        message: dict = {"role": "assistant", "content": self.text}
+        if self.tool_calls:
+            message["tool_calls"] = [_tool_call_dict(c) for c in self.tool_calls]
+        if self.reasoning:
+            message["reasoning_content"] = self.reasoning
+        return message
 
 
 @dataclass
@@ -56,6 +71,24 @@ class LLMProvider(Protocol):
 
     def chat(self, system: str, messages: list[Message], tools: list[ToolSpec],
              force_answer: bool = False) -> AssistantTurn: ...
+
+
+def chat_format(system: str, messages: list[Message]) -> list[dict]:
+    """Our messages in the OpenAI chat format (Groq's API, and Langfuse's conversation view)."""
+    chat = [{"role": "system", "content": system}]
+    for m in messages:
+        if m.role == "tool":
+            chat.append({"role": "tool", "tool_call_id": m.tool_call_id, "content": m.content})
+        elif m.tool_calls:
+            chat.append({"role": "assistant", "content": m.content or None,
+                         "tool_calls": [_tool_call_dict(c) for c in m.tool_calls]})
+        else:
+            chat.append({"role": m.role, "content": m.content})
+    return chat
+
+
+def _tool_call_dict(call: ToolCall) -> dict:
+    return {"id": call.id, "type": "function", "function": {"name": call.name, "arguments": json.dumps(call.arguments)}}
 
 
 class NoProviderAvailable(RuntimeError):

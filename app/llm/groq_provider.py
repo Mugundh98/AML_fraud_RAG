@@ -1,6 +1,6 @@
 import json
 
-from app.llm.base import AssistantTurn, Message, ToolCall, ToolSpec
+from app.llm.base import AssistantTurn, Message, ToolCall, ToolSpec, chat_format
 
 
 class GroqProvider:
@@ -46,23 +46,19 @@ class GroqProvider:
         ]
         if not reply.content and not calls:
             raise RuntimeError("empty response")
-        return AssistantTurn(text=reply.content or "", tool_calls=calls)
+        return AssistantTurn(text=reply.content or "", tool_calls=calls, model=response.model or self.model,
+                             usage=_usage(response.usage), reasoning=getattr(reply, "reasoning", None) or "")
 
-    @staticmethod
-    def to_messages(system: str, messages: list[Message]) -> list[dict]:
-        chat = [{"role": "system", "content": system}]
-        for m in messages:
-            if m.role == "tool":
-                chat.append({"role": "tool", "tool_call_id": m.tool_call_id, "content": m.content})
-            elif m.tool_calls:
-                chat.append({
-                    "role": "assistant",
-                    "content": m.content or None,
-                    "tool_calls": [
-                        {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": json.dumps(c.arguments)}}
-                        for c in m.tool_calls
-                    ],
-                })
-            else:
-                chat.append({"role": m.role, "content": m.content})
-        return chat
+    to_messages = staticmethod(chat_format)
+
+
+def _usage(usage) -> dict[str, int]:
+    if usage is None:
+        return {}
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = (getattr(details, "cached_tokens", None) or 0) if details else 0
+    # Groq's prompt_tokens includes cached tokens; Langfuse buckets must not overlap.
+    result = {"input": usage.prompt_tokens - cached, "output": usage.completion_tokens}
+    if cached:
+        result["cache_read_input_tokens"] = cached
+    return result
