@@ -75,3 +75,42 @@ def test_build_router_orders_gemini_models_before_groq():
         "gemini/gemini-flash-lite-latest",
         "groq/openai/gpt-oss-120b",
     ]
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_failed_provider_is_skipped_during_cooldown():
+    clock = Clock()
+    gemini = FakeProvider("gemini", error=RuntimeError("504 DEADLINE_EXCEEDED"))
+    groq = FakeProvider("groq", reply="from groq")
+    router = LLMRouter([gemini, groq], cooldown_seconds=120, clock=clock)
+
+    router.generate("sys", MESSAGES)
+    clock.now += 60
+    result = router.generate("sys", MESSAGES)
+    assert gemini.calls == 1
+    assert result.fallback_reasons == ["gemini/gemini-model: skipped, failed 60s ago"]
+
+    clock.now += 61  # cooldown over: try it again
+    router.generate("sys", MESSAGES)
+    assert gemini.calls == 2
+
+
+def test_cooling_providers_are_still_tried_as_last_resort():
+    clock = Clock()
+    gemini = FakeProvider("gemini", error=RuntimeError("503"))
+    groq = FakeProvider("groq", error=RuntimeError("429"))
+    router = LLMRouter([gemini, groq], clock=clock)
+    with pytest.raises(NoProviderAvailable):
+        router.generate("sys", MESSAGES)
+
+    gemini.error = None
+    gemini.reply = "back"
+    clock.now += 10
+    assert router.generate("sys", MESSAGES).text == "back"

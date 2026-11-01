@@ -9,8 +9,8 @@ A learning project for **RAG** and **MCP**, built as an enterprise-style AML and
       │  HTTP
       ▼
  FastAPI backend ──── SQLite (users, roles, audit log)            [phase 5]
-  ├─ agent loop (Gemini → Groq fallback)
-  └─ MCP client                                                   [phase 3]
+  ├─ agent loop (Gemini → Groq fallback)                          [phase 3 ✓]
+  └─ MCP client                                                   [phase 3 ✓]
        ├── aml-data-mcp (ours) ──┬── Neo4j  (customers, accounts, transactions)   [phase 2 ✓]
        │                         └── Qdrant (regulations, policies, typologies)   [phase 1 ✓]
        ├── tavily-mcp            (web search)                     [phase 4]
@@ -24,8 +24,8 @@ A learning project for **RAG** and **MCP**, built as an enterprise-style AML and
 |---|---|---|
 | 1 | Document RAG: hybrid search in Qdrant, cited answers, Gemini→Groq fallback, Streamlit chat | **Done** |
 | 2 | Synthetic transactions (≤ 50k rows) in Neo4j + our own `aml-data-mcp` server | **Done** |
-| 3 | Agent loop that routes between documents and the graph via MCP | Next |
-| 4 | Tavily, Google Calendar, Slack MCP servers, with confirmation before any write | |
+| 3 | Agent loop that routes between documents and the graph via MCP | **Done** |
+| 4 | Tavily, Google Calendar, Slack MCP servers, with confirmation before any write | Next |
 | 5 | Hardening: audit log, roles, PII redaction, Langfuse tracing, evaluation set | |
 
 ## Phase 1: how it works
@@ -36,9 +36,9 @@ A learning project for **RAG** and **MCP**, built as an enterprise-style AML and
    - a **dense** vector (`bge-small-en-v1.5`) for meaning ("hiding cash deposits" ≈ "structuring")
    - a **sparse BM25** vector for exact terms ("CTR", "31 U.S.C. 5324")
 4. **Search** – Qdrant runs both searches and merges them with distribution-based score fusion, DBSF (`app/rag/store.py`). We started with Reciprocal Rank Fusion, but it only compares ranks: for "structuring red flags" the dense search liked every chunk of a document *titled* "…Red Flags", and RRF let that outvote a much stronger keyword match. DBSF uses the actual scores and got 8/8 test queries right (RRF 7/8); a cross-encoder reranker also got 8/8 but was ~5× slower.
-5. **Answer** – the top passages are numbered and sent to the LLM, which must cite them as `[1]`, `[2]` (`app/rag/pipeline.py`).
+5. **Answer** – the top passages are numbered and sent to the LLM, which must cite them as `[1]`, `[2]`. In phase 1 this was a fixed pipeline (search, then answer); since phase 3 the agent decides when to search, through the `search_policies` MCP tool.
 6. **Fallback** – models are tried in order: Gemini Flash → Gemini Flash-Lite → Groq (`app/llm/router.py`). Each call has a 30-second limit; on a missing key, timeout, rate limit or overload (free-tier 503s are common) the next one answers. If none works, you still get the retrieved passages.
-7. **Follow-ups** – the previous question is added to the search, so "is it a crime?" still finds the right passages.
+7. **Follow-ups** – the agent sees the recent conversation and writes its own search query, so "is it a crime?" still finds the right passages.
 
 ## Quick start (Windows)
 
@@ -71,7 +71,7 @@ uvicorn app.api.main:app --port 8000
 streamlit run ui/streamlit_app.py
 ```
 
-Without `QDRANT_URL`, Qdrant runs embedded in `storage/qdrant/`. Only one process can open that folder, so stop the API before running `scripts.ingest_docs`, or use the **Re-index documents** button in the UI.
+Without `QDRANT_URL`, Qdrant runs embedded in `storage/qdrant/`. Only one process can open that folder, and since phase 3 that's the MCP server the API starts. So with embedded Qdrant, stop the API before running `scripts.ingest_docs`; the **Re-index documents** button needs Qdrant Cloud.
 
 ## Phase 2: the transaction graph and the MCP server
 
@@ -150,7 +150,42 @@ npx @modelcontextprotocol/inspector .venv/Scripts/python.exe -m mcp_servers.aml_
 
 To use it from Claude Desktop or another MCP client, add a stdio server whose command is `.venv\Scripts\python.exe`, args `-m mcp_servers.aml_data`, and working directory set to this project.
 
-With embedded Qdrant (no `QDRANT_URL`), `search_policies` can't run while the API is also running, because only one process can open the local store. Use Qdrant Cloud to run both.
+With embedded Qdrant (no `QDRANT_URL`), only one copy of the server can search at a time, because only one process can open the local store: running the API (which starts its own copy) and the Inspector together needs Qdrant Cloud.
+
+## Phase 3: the agent
+
+The API no longer runs a fixed "search, then answer" pipeline. An agent loop (`app/agent/loop.py`) gives the model the MCP tools and lets it decide:
+
+```
+question ─► LLM ─► tool calls? ──no──► answer (+ cited sources, tool trace)
+             ▲          │yes
+             └── results ◄── MCP servers (calls in one round run in parallel)
+```
+
+- **MCP client** – `app/agent/mcp_hub.py` starts each MCP server as a subprocess when the API starts, lists its tools and keeps the connection open. Tools are offered to the model by their MCP name, description and JSON Schema. Several servers can be attached; phase 4 adds more.
+- **Read-only for now** – only tools the server marks `readOnlyHint` are offered. Anything that could change something (send a Slack message, book a meeting) waits for phase 4's confirmation step.
+- **One tool format, two providers** – messages are stored in a neutral format and translated per provider (`app/llm/gemini.py`, `app/llm/groq_provider.py`). Gemini 3 attaches a *thought signature* to each tool call and rejects the next request if it isn't sent back, so the signature travels with the call.
+- **Fallback mid-task** – if Gemini fails on step 3, Groq continues from the same conversation, including Gemini's tool calls and their results. A task only moves down the list, never back.
+- **Circuit breaker** – a model that fails is skipped for 2 minutes, so an overloaded Gemini Flash doesn't cost every request a 30-second timeout (`app/llm/router.py`).
+- **Citations across searches** – each `search_policies` call numbers its passages from 1, so the agent renumbers them per answer; the same passage found twice keeps its number. Only the passages the answer cites are returned as sources.
+- **Bounded** – after 6 rounds of tool calls the model is told to answer with what it has. Tool results over 12,000 characters are cut, with a note telling the model to narrow its query.
+
+Ask from the terminal and see every tool call:
+
+```bash
+python -m scripts.ask "Who owns account A001520? Is their cash activity suspicious?"
+```
+
+The Streamlit UI shows the same trace under **Tool calls** for each answer.
+
+What live testing taught us (each one is now fixed):
+
+| Problem | Fix |
+|---|---|
+| No tool mapped an account to its owner, so the model guessed and made 7 calls | `get_account_transactions` returns the owner; tool descriptions show the ID formats |
+| Asked if activity was suspicious, the model compared monthly totals with the declared volume (which matched) and missed 5 deposits just under $10,000 | The system prompt tells it to run the matching detection tools |
+| Told it may not call tools, Gemini Flash-Lite returned an empty reply | The last round also says, in words, to answer now |
+| Gemini Flash overloaded (503/504) on most requests that day | Circuit breaker, so later requests go straight to Flash-Lite |
 
 ## Adding documents
 

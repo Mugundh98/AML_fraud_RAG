@@ -40,7 +40,7 @@ class DocSearch(Protocol):
 
 def create_server(graph: Callable[[], GraphRepository], docs: Callable[[], DocSearch]) -> MCPServer:
     """Build the server. `graph` and `docs` are factories so connections open on first use, not at startup."""
-    server = MCPServer("aml-data", instructions=INSTRUCTIONS, version="0.2.0")
+    server = MCPServer("aml-data", instructions=INSTRUCTIONS, version="0.3.0")
 
     # ---------- knowledge base ----------
 
@@ -56,7 +56,8 @@ def create_server(graph: Callable[[], GraphRepository], docs: Callable[[], DocSe
         return {
             "query": query,
             "passages": [
-                {"number": i, "title": h.title, "section": h.section, "source": h.source, "page": h.page, "text": h.text}
+                {"number": i, "title": h.title, "section": h.section, "source": h.source, "page": h.page,
+                 "score": round(h.score, 4), "text": h.text}
                 for i, h in enumerate(hits, start=1)
             ],
         }
@@ -65,7 +66,8 @@ def create_server(graph: Callable[[], GraphRepository], docs: Callable[[], DocSe
 
     @server.tool(annotations=READ_ONLY)
     def find_customers(name: str, limit: int = 10) -> dict[str, Any]:
-        """Find customers whose name contains the given text (case-insensitive). Use this to turn a name into a customer_id."""
+        """Find customers whose name contains the given text (case-insensitive). Use this to turn a name into a
+        customer_id. Customer IDs look like C01129, account IDs like A001520, alert IDs like AL-0002."""
         rows = _graph(graph).find_customers(name, _clamp(limit, 1, 50))
         return {"count": len(rows), "customers": rows}
 
@@ -98,8 +100,9 @@ def create_server(graph: Callable[[], GraphRepository], docs: Callable[[], DocSe
         min_amount: float = 0,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """Transactions on an account in the last `days` days (newest first), with totals in and out.
-        Filter by direction, channel or minimum amount to focus on what matters."""
+        """The account (type, opening date, owner's customer_id and name) and its transactions in the last
+        `days` days (newest first), with totals in and out. Filter by direction, channel or minimum amount to
+        focus on what matters. Use limit=1 to just find out who owns an account."""
         result = _graph(graph).account_transactions(
             account_id, _clamp(days, 1, 365), direction, channel, max(0.0, min_amount), _clamp(limit, 1, 200)
         )

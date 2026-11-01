@@ -115,7 +115,16 @@ class GraphRepository:
 
     def account_transactions(self, account_id: str, days: int, direction: str, channel: str | None,
                              min_amount: float, limit: int) -> dict | None:
-        if not self._read("MATCH (a:Account {account_id: $id}) RETURN 1 AS ok", id=account_id):
+        account = self._read(
+            """
+            MATCH (a:Account {account_id: $id})
+            OPTIONAL MATCH (c:Customer)-[:OWNS]->(a)
+            RETURN a.account_id AS account_id, a.account_type AS account_type, a.opened_on AS opened_on,
+                   c.customer_id AS owner_customer_id, c.name AS owner_name
+            """,
+            id=account_id,
+        )
+        if not account:
             return None
         params = dict(id=account_id, start=self.window_start(days), direction=direction, channel=channel,
                       min_amount=min_amount, limit=limit)
@@ -145,7 +154,7 @@ class GraphRepository:
             **params,
         )
         return {
-            "account_id": account_id,
+            "account": account[0],
             "period": {"from": self.window_start(days).date().isoformat(), "to": self.as_of().isoformat()},
             "summary": summary,
             "transactions": transactions,

@@ -34,7 +34,7 @@ class FakeGraph:
 class FakeDocs:
     def search(self, query, limit):
         hit = SimpleNamespace(title="US BSA/AML Reporting Requirements", section="Filing deadlines",
-                              source="seed/us.md", page=None, text="File within 30 days.")
+                              source="seed/us.md", page=None, score=0.9, text="File within 30 days.")
         return [hit][:limit]
 
 

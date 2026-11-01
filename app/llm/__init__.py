@@ -1,4 +1,7 @@
-from app.llm.base import LLMResult, Message, NoProviderAvailable
-from app.llm.router import LLMRouter, build_router
+from app.llm.base import AssistantTurn, LLMResult, Message, NoProviderAvailable, ToolCall, ToolSpec
+from app.llm.router import ChatStep, LLMRouter, build_router
 
-__all__ = ["LLMResult", "LLMRouter", "Message", "NoProviderAvailable", "build_router"]
+__all__ = [
+    "AssistantTurn", "ChatStep", "LLMResult", "LLMRouter", "Message", "NoProviderAvailable", "ToolCall", "ToolSpec",
+    "build_router",
+]
