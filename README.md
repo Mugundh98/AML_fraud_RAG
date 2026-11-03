@@ -2,6 +2,8 @@
 
 A learning project for **RAG** and **MCP**, built as an enterprise-style AML and fraud assistant on free services.
 
+**Running it or showing it to someone?** Follow [DEMO_GUIDE.md](DEMO_GUIDE.md): start-up steps, a 10-minute demo script and troubleshooting.
+
 ## Architecture (target)
 
 ```
