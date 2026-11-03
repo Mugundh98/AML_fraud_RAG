@@ -9,7 +9,8 @@ from mcp.types import ToolAnnotations
 
 from app.agent.approvals import ApprovalQueue
 from app.agent.loop import Agent
-from app.agent.mcp_hub import MCPHub, ServerConfig
+from app.agent.mcp_hub import MCPHub, ServerConfig, default_servers, settings_env
+from app.config import PROJECT_ROOT, Settings
 from app.llm import AssistantTurn, LLMRouter, Message, ToolCall
 from mcp_servers.aml_data.server import create_server
 from tests.test_mcp_server import FakeGraph
@@ -290,3 +291,16 @@ def test_schemas_are_compacted_without_losing_constraints():
         },
         "required": ["title"],
     }
+
+
+def test_server_subprocesses_get_settings_from_the_environment(monkeypatch):
+    # In a container the settings are environment variables, and the MCP SDK passes subprocesses almost none.
+    monkeypatch.setenv("NEO4J_PASSWORD", "from-a-secret")
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", "/models")
+    monkeypatch.setenv("SOMETHING_ELSE", "not ours")
+    env = settings_env()
+    assert env["NEO4J_PASSWORD"] == "from-a-secret" and env["FASTEMBED_CACHE_PATH"] == "/models"
+    assert "SOMETHING_ELSE" not in env
+
+    servers = default_servers(Settings(_env_file=None), PROJECT_ROOT)
+    assert servers["aml-data"].target.env["NEO4J_PASSWORD"] == "from-a-secret"

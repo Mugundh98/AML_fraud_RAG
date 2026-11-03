@@ -1,0 +1,13 @@
+# Never put keys, tokens, user files or local data in the image.
+.env
+secrets/
+storage/
+data/raw/
+data/synthetic/
+.venv/
+.git/
+.claude/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/

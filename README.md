@@ -26,7 +26,7 @@ A learning project for **RAG** and **MCP**, built as an enterprise-style AML and
 | 2 | Synthetic transactions (≤ 50k rows) in Neo4j + our own `aml-data-mcp` server | **Done** |
 | 3 | Agent loop that routes between documents and the graph via MCP | **Done** |
 | 4 | Tavily, Google Calendar, Slack MCP servers, with confirmation before any write | **Done** |
-| 5 | Hardening: Langfuse tracing ✓, users and roles ✓, audit log ✓, PII pseudonymization ✓, evaluation set | In progress |
+| 5 | Hardening: Langfuse tracing, users and roles, audit log, PII pseudonymization, evaluation set | **Done** |
 
 ## Phase 1: how it works
 
@@ -333,6 +333,37 @@ A perfect score mostly says v0 is too easy to tell versions apart: every questio
 ## Adding documents
 
 Drop PDFs or markdown files into `data/docs/` (any subfolder) and re-index. `data/SOURCES.md` lists public regulatory documents worth adding. Re-indexing replaces a file's old chunks, so it's safe to run repeatedly.
+
+## Running in a container
+
+The app also runs as one Docker container (`Dockerfile`): the API listens only inside it, and Streamlit is the one published port (7860). Neo4j, Qdrant and the LLMs are already cloud services, so only the backend and UI are in it. It's ready for hosting, but isn't hosted.
+
+```bash
+docker build -t aml-assistant .
+```
+
+```bash
+docker run --rm -p 127.0.0.1:7860:7860 --env-file .env -e USERS_JSON="$(cat secrets/users.json)" aml-assistant
+```
+
+Then open http://localhost:7860. Add `-e GOOGLE_CLIENT_SECRET_JSON="$(cat secrets/google_client_secret.json)" -e GOOGLE_TOKEN_JSON="$(cat secrets/google_token.json)"` for Google Calendar.
+
+How settings reach the app: hosts pass secrets as environment variables, not files. `deploy/start.sh` runs `deploy/bootstrap.py`, which writes the three that are files (`USERS_JSON`, `GOOGLE_CLIENT_SECRET_JSON`, `GOOGLE_TOKEN_JSON`) where the app expects them, and `settings_env()` in `app/agent/mcp_hub.py` forwards the settings to the MCP server subprocesses (the MCP SDK passes them almost no environment by default, so without it the aml-data server would start without its database password).
+
+A hosted copy refuses to start without users (`deploy/bootstrap.py`), so a stranger with the link can't act as a lead, post to Slack or use up the AI quota. `-e ALLOW_OPEN_MODE=true` overrides that for a local test.
+
+### Hosting options we checked (November 2026)
+
+Measured memory: about 700 MB in the container (Linux), 1,030 MB on Windows (aml-data server 531 MB with the search models, API 392 MB, Slack and Calendar servers ~50 MB each).
+
+| Host | Result |
+|---|---|
+| Hugging Face Spaces | Docker Spaces on free CPU now need a PRO subscription ($9/month); creating one on a free account returns 402 |
+| Render free | 512 MB, too small as is. Would need the MCP servers in-process (one copy of the search models) and possibly hosted embeddings |
+| Google Cloud Run | Should run this container as is with 1 GB of memory, within the free monthly allowance, but needs a billing card |
+| A tunnel (ngrok, Cloudflare) | Free; works only while the laptop runs the app |
+
+On any of them: rotate keys that have been pasted anywhere first; free hosts have no permanent disk, so the audit log resets on restart (a disk mounted at `/data` is used automatically); and Google Calendar's sign-in expires every 7 days while the Google app is in Testing mode.
 
 ## Tests
 

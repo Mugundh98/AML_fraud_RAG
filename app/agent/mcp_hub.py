@@ -10,6 +10,7 @@ that may run without approval, and everything else from that server needs it.
 
 import json
 import logging
+import os
 import sys
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
@@ -64,7 +65,8 @@ def default_servers(settings: Settings, project_root: Path) -> dict[str, ServerC
     """Our own servers run as subprocesses; Tavily's is hosted. Each one is only added when it's configured."""
 
     def local(module: str) -> StdioServerParameters:
-        return StdioServerParameters(command=sys.executable, args=["-m", module], cwd=str(project_root))
+        return StdioServerParameters(command=sys.executable, args=["-m", module], cwd=str(project_root),
+                                     env=settings_env())
 
     servers = {"aml-data": ServerConfig(local("mcp_servers.aml_data"), returns_pii=True, receives_pii=True)}
     if settings.tavily_api_key:
@@ -90,6 +92,17 @@ def default_servers(settings: Settings, project_root: Path) -> dict[str, ServerC
     if settings.slack_bot_token:
         servers["slack"] = ServerConfig(local("mcp_servers.slack"), receives_pii=True)  # the bank's own Slack
     return servers
+
+
+def settings_env() -> dict[str, str]:
+    """Our settings from the environment, for the server subprocesses.
+
+    The MCP SDK only passes a subprocess a safe minimum (PATH, HOME...). Locally every server reads the same .env
+    file anyway; in a container the settings arrive as environment variables (a host's secrets), so they're
+    forwarded here, giving each server what the .env file would.
+    """
+    names = {name.upper() for name in Settings.model_fields} | {"FASTEMBED_CACHE_PATH"}
+    return {key: value for key, value in os.environ.items() if key.upper() in names}
 
 
 def compact_schema(schema: dict[str, Any], keep: set[str] | None = None) -> dict[str, Any]:
