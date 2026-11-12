@@ -336,6 +336,19 @@ A perfect score mostly says v0 is too easy to tell versions apart: every questio
 
 Drop PDFs or markdown files into `data/docs/` (any subfolder) and re-index. `data/SOURCES.md` lists public regulatory documents worth adding. Re-indexing replaces a file's old chunks, so it's safe to run repeatedly.
 
+## Keeping the free databases awake
+
+Qdrant Cloud and Neo4j AuraDB suspend free databases after a few days without requests. `python -m scripts.keep_alive` reads one passage from Qdrant and counts customers in Neo4j (nothing is changed), and appends the result to `storage/keep_alive.log`.
+
+On Windows it's scheduled every 2 days at 10:00 as the task **AML assistant keep-alive** (Task Scheduler; it runs when the laptop next starts if it was off). To set it up on another machine, from the project root in PowerShell:
+
+```powershell
+$root = (Get-Location).Path
+Register-ScheduledTask -TaskName "AML assistant keep-alive" -Action (New-ScheduledTaskAction -Execute "$root\.venv\Scripts\pythonw.exe" -Argument "-m scripts.keep_alive" -WorkingDirectory $root) -Trigger (New-ScheduledTaskTrigger -Daily -DaysInterval 2 -At 10am) -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable)
+```
+
+Remove it with `Unregister-ScheduledTask -TaskName "AML assistant keep-alive"`. If a database was already paused, resume it in its console (console.neo4j.io, cloud.qdrant.io): a request can't wake it.
+
 ## Running in a container
 
 The app also runs as one Docker container (`Dockerfile`): the API listens only inside it, and Streamlit is the one published port (7860). Neo4j, Qdrant and the LLMs are already cloud services, so only the backend and UI are in it. It's ready for hosting, but isn't hosted.
